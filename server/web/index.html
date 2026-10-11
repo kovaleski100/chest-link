@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chest Link — Transfer Hub</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app-shell">
+<header class="topbar">
+  <div class="brand"><span class="eyebrow">LOCAL TRANSFER HUB</span><h1>Chest Link <span>0.3</span></h1><p>Organize cópias e encaminhe Pokémon entre os seus dispositivos.</p></div>
+  <div class="connection-card"><div><span class="status-dot"></span><strong>Servidor online</strong><span id="connection">Conectando…</span></div><button id="refresh" class="button secondary">Atualizar</button></div>
+</header>
+<main class="layout">
+  <aside class="sidebar">
+    <div class="section-title"><div><span class="eyebrow">ARQUIVO</span><h2>Cópias no PC</h2></div><span id="total-count" class="count">0</span></div>
+    <p class="muted">Cópias recebidas dos consoles. O original permanece guardado após cada envio.</p>
+    <div class="filters" role="group" aria-label="Filtrar cópias"><button data-filter="0" aria-pressed="true">Todas</button><button data-filter="1">DS <span id="ds-count">0</span></button><button data-filter="2">3DS <span id="3ds-count">0</span></button></div>
+    <label class="search">Buscar por nome ou ID<input id="search" type="search" placeholder="Ex.: SoulSilver"></label>
+    <div id="banks" role="listbox" aria-label="Bancos guardados"></div>
+    <div class="sidebar-note"><strong>Como funciona</strong><p>Envie uma cópia pelo console. Ela aparece aqui para consulta e encaminhamento.</p></div>
+  </aside>
+  <section class="workspace" aria-label="Área de seleção">
+    <div class="workspace-head"><div><span class="eyebrow">SELEÇÃO</span><h2 id="workspace-title">Nenhum banco selecionado</h2><p id="workspace-subtitle" class="muted">Escolha uma cópia na lista para começar.</p></div><div class="box-picker"><button id="prev-box" class="icon-button" aria-label="Box anterior">‹</button><label>Box<select id="box-select" disabled aria-label="Escolher box"></select></label><button id="next-box" class="icon-button" aria-label="Próxima box">›</button></div></div>
+    <div class="stats" aria-live="polite"><div><span class="stat-label">Estado</span><strong id="status">Aguardando uma cópia</strong></div><div><span class="stat-label">Seleção</span><strong id="selection-count">Nenhuma</strong></div><div><span class="stat-label">Conexão</span><strong id="connection-short">—</strong></div></div>
+    <div class="box-card"><div class="box-card-head"><div><span id="box-label" class="eyebrow">BOX</span><h3 id="box-name">Selecione um banco</h3></div><span id="box-position" class="muted">—</span></div><div id="pokemon-grid" class="pokemon-grid" role="grid" aria-label="Pokémon da box"></div><div class="grid-foot"><span>30 espaços por box</span><span>Setas navegam · A/Espaço marcam</span></div></div>
+    <div class="actions"><button id="clear" class="button secondary" disabled>Limpar seleção</button><button id="to-ds" class="button primary" disabled>Enviar seleção ao DS</button><button id="to-3ds" class="button primary" disabled>Enviar seleção ao 3DS</button></div>
+    <p id="status-detail" class="status-detail" role="status" aria-live="polite">As cópias são verificadas antes de serem encaminhadas.</p>
+  </section>
+</main>
+<footer>Chest Link é independente. <button id="credits" class="link-button">Créditos e licenças</button></footer>
+<dialog id="confirm"><span class="eyebrow">CONFIRMAR ENVIO</span><h2 id="confirm-title">Encaminhar seleção?</h2><p id="confirm-description"></p><div class="dialog-fields"><label>IP do console<input id="destination-ip" inputmode="decimal" placeholder="192.168.1.42"></label><label>PIN exibido no console<input id="destination-pin" inputmode="numeric" maxlength="6" placeholder="000000"></label></div><div class="dialog-actions"><button id="cancel-send" class="button secondary">Voltar</button><button id="confirm-send" class="button primary">Enviar diretamente</button></div></dialog>
+<dialog id="credits-dialog"><span class="eyebrow">SOBRE O PROJETO</span><h2>Chest Link</h2><p>Interface de armazenamento inspirada no PKSM, adaptada para transferências locais entre Chest, PKSM e PC.</p><p>Fontes, licenças, atribuições e procedência dos recursos acompanham o pacote em <code>codigo/THIRD_PARTY.md</code>.</p><button id="close-credits" class="button secondary">Fechar</button></dialog>
+<script src="/app.js"></script>
+</div>
+</body>
+</html>

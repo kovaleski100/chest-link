@@ -1,0 +1,6 @@
+{
+  "PKSM_revision": "9e18c8068ede315f73a99f4c834819630393b5c5",
+  "PokeAPI_sprites_revision": "961f4fcc85b159f9c5fff356356dee1bf9069898",
+  "icon_sources": "PokeAPI/sprites: generation-vii/icons for species 1..809; generation-viii/icons for 810..898; 20 named alternate forms",
+  "modifications": "Green PKSM storage backgrounds precomposited from original UI PNGs; icons cropped/centered to 34x30 and native 15-color palettes; independent placeholder and egg icons. No raw Pokemon data bundled."
+}

@@ -1,0 +1,14 @@
+build/
+platform/nds/build/
+platform/nds/source/
+platform/3ds/build/
+*.nds
+*.3dsx
+*.smdh
+*.o
+*.d
+*.elf
+*.map
+*.zip
+__pycache__/
+server/dados/

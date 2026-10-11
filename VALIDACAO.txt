@@ -1,0 +1,117 @@
+Chest Link 0.3 — validação de 2026-10-10
+
+Status: interface gráfica e servidor executados no Linux com HTTP/TCP reais.
+Apps nativos DS/DSi e 3DS compilados. Execução física e Windows pendentes.
+
+Comandos executados nesta atualização:
+  make test mailbox-test
+  make gui-test
+  make gui-sanitize ASAN_OPTIONS=detect_leaks=0
+  make ds
+  make 3ds
+
+Resultados:
+  26 grupos de protocolo direto, bancos e recuperação: passaram.
+  9 grupos do adaptador ExtData, com FS simulado: passaram.
+  28 testes do servidor PC e cliente C++ da caixa postal: passaram.
+  4 grupos da seleção individual, toque e renderizador nativo: passaram.
+  13 testes de HTTP/TCP da interface e leitura dos Pokémon: passaram.
+  Total normal: 80 testes/grupos, com bancos sintéticos.
+  Os 4 grupos gráficos e os 13 testes novos passaram também com ASan/UBSan
+  no código C++ de seleção, leitura e renderização. Vazamentos não verificados.
+
+Leitura e seleção:
+  434 vetores independentes de gerações I–VIII/LGPE, com dados descriptografados
+  e criptografados, incluindo todas as 24/32 ordens de blocos relevantes.
+  Resumos nativos C++ e do PC concordaram nos campos conhecidos dos vetores.
+  Espécies internas da geração III, formas e registros inválidos verificados.
+  Seleção individual preserva os 336 bytes de cada registro, incluindo padding,
+  posição do Pokémon na box, nomes das boxes e banco original.
+  Boxes sem seleção são omitidas; espaços não selecionados ficam vazios na cópia.
+  Seleções inválidas e cancelamento não alteram a origem nem publicam parciais.
+  Gerações recusadas no Chest são verificadas na seleção enviada.
+
+Interface gráfica:
+  Renderizador usado nos binários executado no host para inspeção visual.
+  Conferidos grade 6x5, sprites, cursor, seleção, menus, confirmação e IP/PIN.
+  Imagens do DS conferidas com a mesma redução de resolução dos seus binários.
+  Textos do DS ajustados à grade de pixels físicos para conservar legibilidade.
+  Todos os 30 espaços, setas de box, ações e paginação têm toque verificado.
+  Recursos locais: 898 espécies, 20 formas, ovo e marcador desconhecido.
+  Sem requisições de recursos externos na interface do navegador.
+
+Teste real no navegador Chromium 151:
+  Lista de bancos, sprites, seleção por mouse e teclado, troca de box.
+  Cancelamento de confirmação não cria envio; confirmação publica na fila.
+  Cliente C++ busca pelo TCP e recebe exatamente os registros selecionados.
+  Banco original e backup do PC conservados após entrega.
+  Marcar box/todas e limpar seleção; layout estreito sem rolagem horizontal.
+  Nenhum erro de JavaScript. Teste feito com 46 Pokémon sintéticos em duas boxes.
+
+Pacote extraído:
+  ZIP sem erros e sem arquivos de build, dados, saves ou capturas de teste.
+  Todos os hashes de instalação conferidos; headers NDS/3DSX e versão válidos.
+  Atalho Linux iniciado a partir de outro diretório e caminho com espaços.
+  Interface e recursos offline carregados do pacote entregue.
+  Upload, seleção individual, busca TCP e bytes recebidos conferidos.
+  Reinício preservou o PIN salvo, a fila pendente e o backup após entrega.
+
+Servidor e protocolo (regressão):
+  DS->PC->3DS e 3DS->PC->DS, persistência e PIN salvo, filas por destinatário.
+  ACK perdido, uploads incompletos, corrupção, PIN errado e cancelamento.
+  Falha de disco, cota cheia, entrega não registrada e recuperação após falha.
+  Deduplicação de cópias, concorrência, trava de processo, 500 boxes no PC.
+  Transferências diretas e barreiras de recuperação continuam passando.
+  API local verifica chave, Host, Origin e limites e rejeita caminhos externos.
+  Cópias corrompidas são recusadas mesmo após uma prévia consulta da interface.
+  Reenfileirar explicitamente uma cópia entregue não altera seus bytes.
+
+Ferramentas:
+  DS: BlocksDS 1.24.0 / Wonderful ARM GCC 16.2.0.
+  3DS: devkitARM GCC 16.1.0 / libctru do SDK devkitPro.
+  Host: GCC/G++, C++17, AddressSanitizer e UndefinedBehaviorSanitizer.
+  Servidor: Python 3.12.14, somente biblioteca padrão; mínimo documentado 3.9.
+
+Limites:
+  Não houve execução física no DS, DSi ou 3DS.
+  ExtData real, permissões, SD, flashcard e rádio Wi-Fi ainda não exercitados.
+  O adaptador ExtData foi testado com um FS simulado de tamanho fixo.
+  O servidor e a interface foram executados no Linux, não no Windows.
+  ASan/UBSan cobre o código C++ no host; não executa os binários ARM.
+  LeakSanitizer desativado por restrição do ambiente anterior em /proc.
+  Aviso do linker DS sobre .note.GNU-stack ausente em crtn.o vem do SDK.
+  Não são implementadas as outras funções de edição, scripts ou GPSS do PKSM.
+  Nenhum save ou Pokémon real utilizado nos testes.
+
+Artefatos compilados e componentes do PC (SHA-256):
+  ChestLink_DS.nds: 1266176 bytes; 39c993e7559c1152fe1b784bc8e7ff4cf8960415f7ce1aa81ae250467deb8e96
+  ChestLink_3DS.3dsx: 1264464 bytes; 03e388d2eea400508988d76361deea6d832e711a70ea9ed026c061f0d2c07e6f
+  ChestLink_3DS.smdh: 14016 bytes; 5cab971824757fe9beb564ba4e9cf9e58bdc726b19dc5a390b7b07569430363c
+  chest_link_server.py: 23302 bytes; 9eaf8d1b1abe8278975afbb816145f336b77f81a92cd3450d66e05a871678316
+  interface.py: 11857 bytes; 12becfc64ec1e1794a2e96b2c548b810cc9271ef6b6290fb691dbc562746726b
+  pokemon.py: 4836 bytes; d38ed5ee159424fdb2bacda025358006d17839870a41ec2bc6212c1184222bc4
+
+SHA256SUMS.txt no pacote inclui todos os recursos e arquivos de instalação.
+Chest Link 0.3 — validação da atualização de 2026-10-11
+
+Alterações verificadas nesta atualização:
+  Menu nativo reduzido a Consultar bancos, Créditos e Sair; listener direto
+  iniciado automaticamente e confirmação exibida no console receptor.
+  Envio do PC ao listener com IP/PIN, backup mantido no PC e recepção automática
+  de filas quando o console já possui os dados do PC salvos.
+  Interface web substituída por painel responsivo independente do visual PKSM.
+  Preferências de conexão para bancos ExtData ficam no SD; gravações bancárias
+  continuam usando commits de ExtData nas transações de importação.
+
+Comandos executados:
+  python3 -m py_compile PC/*.py codigo/server/*.py codigo/tests/*.py
+  node --check PC/web/app.js codigo/server/web/app.js
+  make test gui-test mailbox-test sanitize mailbox-sanitize
+
+Resultados desta atualização:
+  26 grupos de protocolo/bancos, 9 grupos do adaptador ExtData, 4 grupos
+  gráficos, 13 testes de interface e 28 testes de caixa postal passaram.
+  ASan/UBSan passou nos testes de núcleo, ExtData e caixa postal.
+  A compilação sintática do app, rede e gráficos host passou com -Werror.
+  Os builds ARM físicos não foram repetidos neste ambiente; DS/3DS reais,
+  ExtData real, SD, flashcard e rádio Wi-Fi continuam pendentes de validação.
