@@ -15,7 +15,7 @@ OBJECTS := $(patsubst ../../source/%.cpp,build/%.o,$(COMMON)) build/main.o
 LDFLAGS := $(ARCH) -specs=$(SPECS) -L$(BLOCKSDS)/libs/dswifi/lib -L$(BLOCKSDS)/libs/libnds/lib -Wl,-Map,build/$(NAME).map
 ARM7ELF := $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
 .DELETE_ON_ERROR:
-.PHONY: all clean
+.PHONY: all release clean
 all: $(NAME).nds
 build:
 	mkdir -p build
@@ -26,7 +26,10 @@ build/main.o: main.cpp | build
 build/$(NAME).elf: $(OBJECTS) Makefile
 	$(LD) -o $@ $(OBJECTS) $(LDFLAGS) -Wl,--start-group -ldswifi9 -lnds9 -lstdc++ -lc -Wl,--end-group
 $(NAME).nds: build/$(NAME).elf ../../assets/chestlink-ds.gif Makefile
-	$(BLOCKSDS)/tools/ndstool/ndstool -c $@ -7 $(ARM7ELF) -9 $< -b ../../assets/chestlink-ds.gif "Chest Link;Boxes DS - PC - 3DS v0.3;Chest Link contributors"
+	$(BLOCKSDS)/tools/ndstool/ndstool -c $@ -7 $(ARM7ELF) -9 $< -b ../../assets/chestlink-ds.gif "Chest Link;Boxes DS - PC - 3DS v0.4.10;Chest Link contributors"
+release.json: $(NAME).nds ../../include/version.hpp ../../tools/create_update_manifest.py
+	python3 ../../tools/create_update_manifest.py $(NAME).nds ../../include/version.hpp $@
+release: release.json
 clean:
-	rm -rf build $(NAME).nds
+	rm -rf build $(NAME).nds release.json
 -include $(OBJECTS:.o=.d)

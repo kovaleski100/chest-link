@@ -94,6 +94,9 @@ int Connection::listen(unsigned port) {
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     sockaddr_in a{};
+#ifdef CL_NDS
+    a.sin_len = sizeof(a);
+#endif
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -128,6 +131,9 @@ Connection Connection::accept(int server) {
 Connection Connection::connect(const std::string &ip, unsigned port,
                                unsigned timeout) {
   sockaddr_in a{};
+#ifdef CL_NDS
+  a.sin_len = sizeof(a);
+#endif
   a.sin_family = AF_INET;
   a.sin_port = htons(port);
   if (inet_pton(AF_INET, ip.c_str(), &a.sin_addr) != 1)
@@ -145,8 +151,24 @@ Connection Connection::connect(const std::string &ip, unsigned port,
       ready(fd, true, platform::milliseconds(), timeout);
       int error = 0;
       socklen_t size = sizeof(error);
-      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size) || error)
-        throw Error("Conexao recusada. Abra Receber no destino.");
+      int status = getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size);
+      const int statusError = errno;
+#ifdef CL_3DS
+      // The 3DS socket stack can leave its internal EINPROGRESS value (-26)
+      // in SO_ERROR after the handshake. lwIP on DS uses standard SO_ERROR.
+      if (!status && error == -26) {
+        int retry = ::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a));
+        const int retryError = errno;
+        if (!retry || (retry < 0 && retryError == EISCONN))
+          error = 0;
+      }
+#endif
+      if (status || error)
+        throw Error("Falha TCP para " + ip + ":" + std::to_string(port) +
+                    " (erro " +
+                    std::to_string(status ? statusError : error) +
+                    "). Confira o IP, o Wi-Fi e se o servico Chest Link esta "
+                    "ativo.");
     }
     return Connection(fd);
   } catch (...) {

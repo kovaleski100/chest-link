@@ -18,6 +18,7 @@ from server import chest_link_server as pc
 ROOT = Path(__file__).resolve().parents[1]
 CLI = Path(os.environ.get("CHEST_LINK_CLI", ROOT / "build/chest-link-cli"))
 PROBE = Path(os.environ.get("CHEST_LINK_PROBE", ROOT / "build/mailbox-probe"))
+UPDATE_PROBE = Path(os.environ.get("CHEST_LINK_UPDATE_PROBE", ROOT / "build/update-probe"))
 PIN = 123456
 logging.getLogger("chest-link").setLevel(logging.CRITICAL)
 
@@ -29,12 +30,21 @@ class MailboxTests(unittest.TestCase):
         self.src, self.dst = self.root / "source", self.root / "destination"
         self.create_bank(self.src, 3)
         self.dst.mkdir()
+        self.update_data = (bytes(range(256)) * 513)[:131077]
+        self.update_path = self.root / "release.3dsx"
+        self.update_path.write_bytes(self.update_data)
+        self.nds_update_data = (bytes(range(251)) * 1400)[:310001]
+        self.nds_update_path = self.root / "release.nds"
+        self.nds_update_path.write_bytes(self.nds_update_data)
         self.original = self.snapshot(self.src)
         self.start_server()
 
     def start_server(self):
         self.box = pc.Mailbox(self.root / "pc", PIN)
-        self.server = pc.Server(("127.0.0.1", 0), self.box, timeout_seconds=2)
+        self.server = pc.Server(("127.0.0.1", 0), self.box, timeout_seconds=2,
+                                update_path=self.update_path, update_version=0x403,
+                                nds_update_path=self.nds_update_path,
+                                nds_update_version=0x403)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01})
         self.thread.start()
@@ -136,12 +146,173 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(self.listing(target, 1)[2], [item])
             self.assertTrue((self.box.items / item / "bank.bnk").exists())
 
+    def test_cleared_pending_copy_is_retained_but_hidden_from_console_until_requeued(self):
+        item = self.upload()
+        before = {name: (self.box.items / item / name).read_bytes()
+                  for name in ("bank.bnk", "names.json")}
+        self.assertEqual(self.box.clear_pending(), [item])
+        self.assertEqual(self.listing(2)[2], [])
+        self.assertEqual(self.listing(2, 1)[2], [])
+        self.assertIn("Esta copia foi retirada da fila", self.fetch(item, ok=False))
+        self.assertEqual(self.box.metadata(item)["queue_cleared"], 1)
+        self.assertEqual(before, {name: (self.box.items / item / name).read_bytes()
+                                  for name in before})
+        self.assertEqual(self.box.clear_pending(), [])
+
+    def test_source_update_watcher_waits_for_staged_install_to_finish(self):
+        with tempfile.TemporaryDirectory(prefix="chest-update-watch-") as folder:
+            root = Path(folder)
+            source = root / "servidor.py"
+            marker = root / ".chest-link-update-in-progress"
+            source.write_text("version = 1")
+            marker.touch()
+            stopped = threading.Event()
+            updated = threading.Event()
+            watcher = threading.Thread(
+                target=pc.watch_for_source_updates,
+                args=((source,), marker, stopped, updated.set),
+                kwargs={"poll_interval": 0.01, "stable_checks": 3})
+            watcher.start()
+            time.sleep(0.05)  # Let the watcher capture the pre-update version.
+            source.write_text("version = 2")
+            time.sleep(0.08)
+            self.assertFalse(updated.is_set())
+            marker.unlink()
+            self.assertTrue(updated.wait(1))
+            stopped.set()
+            watcher.join(timeout=1)
+            self.assertFalse(watcher.is_alive())
+
+    def test_pc_discovers_nds_release_only_when_manifest_matches_binary(self):
+        with tempfile.TemporaryDirectory(prefix="chest-nds-release-") as folder:
+            root = Path(folder)
+            script = root / "PC" / "servidor.py"
+            image = root / "DS" / "ChestLink_DS.nds"
+            script.parent.mkdir()
+            image.parent.mkdir()
+            script.touch()
+            image.write_bytes(self.nds_update_data)
+            manifest = dict(format=1, version=0x403, size=len(self.nds_update_data),
+                            sha256=hashlib.sha256(self.nds_update_data).hexdigest())
+            image.with_name("release.json").write_text(json.dumps(manifest))
+            with patch.object(pc, "__file__", str(script)):
+                found, version = pc.find_nds_update()
+            self.assertEqual(found, image)
+            self.assertEqual(version, 0x403)
+
+            manifest["sha256"] = "0" * 64
+            image.with_name("release.json").write_text(json.dumps(manifest))
+            with patch.object(pc, "__file__", str(script)):
+                found, version = pc.find_nds_update()
+            self.assertIsNone(found)
+            self.assertEqual(version, 0)
+
+    def test_unassigned_console_upload_waits_for_manual_pc_routing(self):
+        item = self.upload(0)
+        self.assertEqual(self.listing(0, 1)[2], [item])
+        self.assertEqual(self.listing(1)[2], [])
+        self.assertEqual(self.listing(2)[2], [])
+        self.fetch(item, 2, ok=False)
+        self.assertEqual(self.box.metadata(item)["target"], 0)
+
+    def test_unassigned_upload_defers_generation_compatibility_until_destination(self):
+        source = self.root / "gen9"
+        self.create_bank(source, 3, gen=8)
+        item = self.upload(0, root=source)
+        self.assertEqual(self.listing(0, 1)[2], [item])
+        self.assertEqual(self.box.metadata(item)["offer"]["generations"], 1 << 8)
+
+    def test_3ds_update_is_verified_installed_and_keeps_previous_copy(self):
+        install = self.root / "installed.3dsx"
+        old = b"existing 3dsx stays recoverable"
+        install.write_bytes(old)
+        run = subprocess.run(
+            [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x300), str(install), "1", str(self.port)],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("INSTALLED 0.4.3", run.stdout)
+        self.assertEqual(install.read_bytes(), self.update_data)
+        self.assertEqual(Path(str(install) + ".previous").read_bytes(), old)
+
+        run = subprocess.run(
+            [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x403), str(install), "1", str(self.port)],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CURRENT 0.4.3", run.stdout)
+        self.assertEqual(install.read_bytes(), self.update_data)
+
+    def test_3ds_update_cancel_preserves_installed_copy(self):
+        install = self.root / "installed.3dsx"
+        old = b"do not replace when declined"
+        install.write_bytes(old)
+        run = subprocess.run(
+            [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x300), str(install), "0", str(self.port)],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CANCELLED 0.4.3", run.stdout)
+        self.assertEqual(install.read_bytes(), old)
+
+    def test_nds_update_downloads_verified_launchable_copy(self):
+        install = self.root / "ChestLink_DS_v0.4.3.nds"
+        run = subprocess.run(
+            [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x402), str(self.root),
+             "1", str(self.port), "ds"],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("INSTALLED 0.4.3", run.stdout)
+        self.assertEqual(install.read_bytes(), self.nds_update_data)
+        self.assertFalse(Path(str(install) + ".previous").exists())
+
+    def test_nds_update_preserves_existing_copy_and_supports_cancel(self):
+        install = self.root / "ChestLink_DS_v0.4.3.nds"
+        old = b"existing DS app stays recoverable"
+        install.write_bytes(old)
+        run = subprocess.run(
+            [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x402), str(self.root),
+             "0", str(self.port), "ds"],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CANCELLED 0.4.3", run.stdout)
+        self.assertEqual(install.read_bytes(), old)
+
+        run = subprocess.run(
+            [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x402), str(self.root),
+             "1", str(self.port), "ds"],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(install.read_bytes(), self.nds_update_data)
+        self.assertEqual(Path(str(install) + ".previous").read_bytes(), old)
+
+    def test_3ds_update_hash_mismatch_keeps_installed_and_removes_partial(self):
+        install = self.root / "installed.3dsx"
+        old = b"keep the last working app"
+        install.write_bytes(old)
+        original_exact = pc.exact
+
+        def mutate_release(sock, length):
+            data = original_exact(sock, length)
+            if length == 4:
+                self.update_path.write_bytes(bytes([255]) * len(self.update_data))
+            return data
+
+        with patch.object(pc, "exact", mutate_release):
+            run = subprocess.run(
+                [str(UPDATE_PROBE), "127.0.0.1", str(PIN), str(0x300), str(install), "1", str(self.port)],
+                text=True, capture_output=True, timeout=15)
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("SHA-256 diferente", run.stderr)
+        self.assertEqual(install.read_bytes(), old)
+        self.assertFalse(Path(str(install) + ".download").exists())
+
     def test_pc_restart_preserves_pending_and_saved_pin(self):
         item = self.upload()
         self.stop_server()
         self.box = pc.Mailbox(self.root / "pc")
         self.assertEqual(self.box.pin, PIN)
-        self.server = pc.Server(("127.0.0.1", 0), self.box, timeout_seconds=2)
+        self.server = pc.Server(("127.0.0.1", 0), self.box, timeout_seconds=2,
+                                update_path=self.update_path, update_version=0x403,
+                                nds_update_path=self.nds_update_path,
+                                nds_update_version=0x403)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01})
         self.thread.start()

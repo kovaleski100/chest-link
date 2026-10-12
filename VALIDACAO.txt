@@ -84,14 +84,74 @@ Limites:
   Nenhum save ou Pokémon real utilizado nos testes.
 
 Artefatos compilados e componentes do PC (SHA-256):
-  ChestLink_DS.nds: 1266176 bytes; 39c993e7559c1152fe1b784bc8e7ff4cf8960415f7ce1aa81ae250467deb8e96
-  ChestLink_3DS.3dsx: 1264464 bytes; 03e388d2eea400508988d76361deea6d832e711a70ea9ed026c061f0d2c07e6f
+  ChestLink_DS.nds: 1262080 bytes; 1aba4b9e38f686cac61189ea989590cf93d70dccdd444eeb7aac394b37c3eebf
+  ChestLink_3DS.3dsx: 1259020 bytes; 4debb8bfc3f4484d33f1c9b53b5a3e43be0aee6943408014feb14eac42eccacc
   ChestLink_3DS.smdh: 14016 bytes; 5cab971824757fe9beb564ba4e9cf9e58bdc726b19dc5a390b7b07569430363c
   chest_link_server.py: 23302 bytes; 9eaf8d1b1abe8278975afbb816145f336b77f81a92cd3450d66e05a871678316
   interface.py: 11857 bytes; 12becfc64ec1e1794a2e96b2c548b810cc9271ef6b6290fb691dbc562746726b
   pokemon.py: 4836 bytes; d38ed5ee159424fdb2bacda025358006d17839870a41ec2bc6212c1184222bc4
 
 SHA256SUMS.txt no pacote inclui todos os recursos e arquivos de instalação.
+
+Chest Link 0.3 — recompilação ARM de 2026-10-11
+
+Ambiente:
+  DS: skylyrac/blocksds:slim-latest (BlocksDS 1.24.0, ARM GCC 16.2.0).
+  3DS: devkitpro/devkitarm:20260610 (devkitARM GCC 16.1.0, libctru).
+
+Comandos executados a partir da raiz do projeto:
+  podman run --rm -v "$(pwd)/codigo:/work" -w /work/platform/nds \
+    docker.io/skylyrac/blocksds:slim-latest make
+  podman run --rm -v "$(pwd)/codigo:/work" -w /work/platform/3ds \
+    docker.io/devkitpro/devkitarm:20260610 make
+
+Resultados:
+  make do DS gerou ChestLink_DS.nds com cabeçalho Nintendo DS/DSi enhanced.
+  make do 3DS gerou ChestLink_3DS.3dsx e ChestLink_3DS.smdh.
+  Os três artefatos foram copiados para as pastas de instalação do pacote e
+  reconhecidos como NDS, 3DSX e SMDH; hashes acima e em SHA256SUMS.txt atualizados.
+  Não houve execução física nos consoles; Wi-Fi, ExtData, SD e flashcards
+  continuam pendentes de validação em hardware.
+
+Chest Link 0.4.3 — validação desta revisão, 2026-10-11
+
+Comportamento confirmado nesta versão (esta seção substitui descrições antigas
+de recebimento automático nas notas históricas acima):
+  A interface oferece uma ação confirmada para excluir envios pendentes ao DS/3DS,
+  sem remover originais sem destino ou backups já entregues.
+  O listener direto continua ativo; o console não consulta nem puxa a caixa
+  postal. O envio ao DS/3DS começa somente por ação explícita na interface do PC.
+  Upload console→PC usa cópia sem destinatário; o PC atribui DS/3DS e valida
+  gerações somente quando o usuário inicia o encaminhamento. A cópia original
+  continua preservada. O envio direto entre consoles mantém o destino inferido.
+  Atualizar o app 3DS não pede seleção de armazenamento; IP/PIN usam localização
+  comum no SD e configurações antigas por armazenamento são lidas como fallback.
+  Consultar bancos e receber no 3DS usam automaticamente ExtData ou SD conforme
+  `useExtData` na configuração do PKSM; a escolha manual entre os dois foi removida.
+  O menu do DS agora também oferece atualização pelo PC. O DS baixa o `.nds`
+  validado por SHA-256 para uma cópia separada no dispositivo escolhido, sem
+  presumir o caminho da cópia em execução; o 3DS mantém a instalação no caminho
+  do Homebrew Launcher. O servidor publica as duas plataformas por comandos
+  autenticados distintos e valida cada manifesto antes de anunciar o app.
+
+Verificações concluídas:
+  make test: 26 grupos centrais, 9 grupos ExtData e teste de seleção automática passaram.
+  make gui-test: 4 grupos gráficos e 26 testes de interface passaram.
+  make mailbox-test: 38 testes de protocolo/servidor passaram, incluindo download,
+  cancelamento, substituição com backup e descoberta do manifesto NDS.
+  Python compilado; JavaScript validado; espelhos PC/servidor conferidos.
+  DS recompilado com BlocksDS; 3DS recompilado com devkitARM/libctru.
+  Os manifestos release.json conferem com os binários DS e 3DS. O protocolo de
+  atualização foi exercitado contra o servidor em execução para ambas as plataformas.
+  SHA256SUMS.txt e ZIP verificados.
+
+Artefatos desta revisão:
+  DS/ChestLink_DS.nds: 1261056 bytes; 743a2373d32190729a785196c19a639a8444a38f786556f18821e4e0558dd470
+  3ds/ChestLink_3DS/ChestLink_3DS.3dsx: 1257168 bytes; f399cfbc8dba0005f2b5ce6271f570157476692054d9ff0df772744ea2aba775
+  3ds/ChestLink_3DS/ChestLink_3DS.smdh: 14016 bytes; 5924f5e8f563082233b4ff21d70852ebffe710391c9529df0b6fff66c824aa4c
+
+Não houve teste físico nos consoles; Wi-Fi, ExtData real, SD e flashcards
+continuam pendentes de validação em hardware.
 Chest Link 0.3 — validação da atualização de 2026-10-11
 
 Alterações verificadas nesta atualização:
@@ -113,5 +173,5 @@ Resultados desta atualização:
   gráficos, 13 testes de interface e 28 testes de caixa postal passaram.
   ASan/UBSan passou nos testes de núcleo, ExtData e caixa postal.
   A compilação sintática do app, rede e gráficos host passou com -Werror.
-  Os builds ARM físicos não foram repetidos neste ambiente; DS/3DS reais,
-  ExtData real, SD, flashcard e rádio Wi-Fi continuam pendentes de validação.
+  Os apps foram recompilados em containers oficiais em 2026-10-11; execução
+  física no DS/3DS, ExtData real, SD, flashcard e rádio Wi-Fi pendentes.

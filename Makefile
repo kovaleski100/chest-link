@@ -1,7 +1,7 @@
 CXX ?= g++
 FLAGS := -std=c++17 -g -Wall -Wextra -Werror -pthread -DCL_HOST -Iinclude
 ASAN_OPTIONS ?= detect_leaks=1
-CORE := source/json.cpp source/sha256.cpp source/bank.cpp source/protocol.cpp source/mailbox.cpp
+CORE := source/json.cpp source/sha256.cpp source/bank.cpp source/protocol.cpp source/mailbox.cpp source/update.cpp
 NETWORK := source/network.cpp platform/host/runtime.cpp
 .PHONY: all test mailbox-test gui-test gui-sanitize sanitize mailbox-sanitize ds 3ds clean
 all: build/chest-link-cli
@@ -13,12 +13,17 @@ build/tests: $(CORE) $(NETWORK) tests/tests.cpp $(wildcard include/*.hpp) | buil
 	$(CXX) $(FLAGS) -O2 $(CORE) $(NETWORK) tests/tests.cpp -o $@
 build/mailbox-probe: $(CORE) $(NETWORK) tests/mailbox_probe.cpp $(wildcard include/*.hpp) | build
 	$(CXX) $(FLAGS) -O2 $(CORE) $(NETWORK) tests/mailbox_probe.cpp -o $@
+build/update-probe: $(CORE) $(NETWORK) tests/update_probe.cpp $(wildcard include/*.hpp) | build
+	$(CXX) $(FLAGS) -O2 $(CORE) $(NETWORK) tests/update_probe.cpp -o $@
 build/extdata-tests: platform/3ds/extdata.cpp platform/3ds/extdata.hpp tests/extdata_test.cpp tests/fake-sdk/3ds.h tests/fake-sdk/sys/iosupport.h | build
 	$(CXX) $(FLAGS) -O2 -Itests/fake-sdk platform/3ds/extdata.cpp tests/extdata_test.cpp -o $@
-test: build/tests build/extdata-tests
+build/pksm-storage-tests: platform/3ds/pksm_storage.hpp tests/pksm_storage_test.cpp | build
+	$(CXX) $(FLAGS) -O2 tests/pksm_storage_test.cpp -o $@
+test: build/tests build/extdata-tests build/pksm-storage-tests
 	./build/tests
 	./build/extdata-tests
-mailbox-test: build/chest-link-cli build/mailbox-probe
+	./build/pksm-storage-tests
+mailbox-test: build/chest-link-cli build/mailbox-probe build/update-probe
 	python3 -m unittest discover -s tests -p test_mailbox.py -v
 GRAPHICS := source/graphics.cpp source/graphics_assets.cpp source/pokemon.cpp
 build/render-ui: $(GRAPHICS) source/sha256.cpp tools/render_ui.cpp $(wildcard include/*.hpp) | build
@@ -45,6 +50,7 @@ sanitize: | build
 	ASAN_OPTIONS="$(ASAN_OPTIONS)" ./build/extdata-sanitized
 ds:
 	$(MAKE) -C platform/nds
+	python3 tools/create_update_manifest.py platform/nds/ChestLink_DS.nds include/version.hpp platform/nds/release.json
 3ds:
 	$(MAKE) -C platform/3ds
 clean:

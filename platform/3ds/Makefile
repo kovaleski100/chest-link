@@ -8,7 +8,7 @@ COMMON := $(wildcard ../../source/*.cpp)
 OBJECTS := $(patsubst ../../source/%.cpp,build/%.o,$(COMMON)) build/main.o build/extdata.o
 LDFLAGS := $(ARCH) -specs=3dsx.specs -L$(DEVKITPRO)/libctru/lib -Wl,--gc-sections,-Map,build/$(NAME).map
 .PHONY: all clean
-all: $(NAME).3dsx $(NAME).smdh
+all: $(NAME).3dsx $(NAME).smdh release.json
 build:
 	mkdir -p build
 build/%.o: ../../source/%.cpp | build
@@ -19,10 +19,12 @@ build/extdata.o: extdata.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 build/$(NAME).elf: $(OBJECTS)
 	$(CXX) $(LDFLAGS) $(OBJECTS) -lctru -lm -o $@
-$(NAME).smdh: Makefile ../../assets/chestlink-3ds.png
-	$(DEVKITPRO)/tools/bin/smdhtool --create "Chest Link" "Boxes DS - PC - 3DS v0.3" "Chest Link contributors" ../../assets/chestlink-3ds.png $@
+$(NAME).smdh: Makefile ../../assets/chestlink-3ds.png ../../include/version.hpp
+	$(DEVKITPRO)/tools/bin/smdhtool --create "Chest Link" "Boxes DS - PC - 3DS v0.4.3" "Chest Link contributors" ../../assets/chestlink-3ds.png $@
 $(NAME).3dsx: build/$(NAME).elf $(NAME).smdh
 	$(DEVKITPRO)/tools/bin/3dsxtool $< $@ --smdh=$(NAME).smdh
+release.json: $(NAME).3dsx ../../include/version.hpp ../../tools/create_update_manifest.py
+	python3 ../../tools/create_update_manifest.py $(NAME).3dsx ../../include/version.hpp $@
 clean:
 	rm -rf build $(NAME).3dsx $(NAME).smdh
 -include $(OBJECTS:.o=.d)

@@ -1,5 +1,6 @@
 #include "extdata.hpp"
 #include "graphics.hpp"
+#include "pksm_storage.hpp"
 #include "platform.hpp"
 #include <3ds.h>
 #include <3ds/archive.h>
@@ -98,12 +99,36 @@ uint32_t makePin() {
 unsigned maxChestBoxes() { return 500; }
 std::vector<chestlink::Store> stores() {
   std::vector<chestlink::Store> out;
-  if (extMounted && (chestlink::exists("pksm:/banks.json") ||
-                     chestlink::exists("pksm:/banks") ||
-                     chestlink::exists("pksm:/chest-link/journal.json")))
+  bool useExtData = extMounted;
+  bool configured = false;
+  if (extMounted && chestlink::exists("pksm:/config.json")) {
+    try {
+      auto setting = platform_detail::pksmUseExtData(
+          chestlink::readText("pksm:/config.json", 64 * 1024));
+      if (setting) {
+        useExtData = *setting;
+        configured = true;
+      }
+    } catch (const chestlink::Error &) {
+    }
+  }
+  if (!configured) {
+    const bool hasExtDataBanks =
+        extMounted && (chestlink::exists("pksm:/banks.json") ||
+                       chestlink::exists("pksm:/banks") ||
+                       chestlink::exists("pksm:/chest-link/journal.json"));
+    const bool hasSDBanks =
+        chestlink::exists("sdmc:/3ds/PKSM/banks.json") ||
+        chestlink::exists("sdmc:/3ds/PKSM/banks");
+    if (hasExtDataBanks != hasSDBanks)
+      useExtData = hasExtDataBanks;
+  }
+  if (useExtData && extMounted)
     out.push_back(
         {"PKSM (ExtData)", "pksm:", 500, chestlink::PKSM_GENS, commitPKSM});
-  out.push_back({"PKSM (SD)", "sdmc:/3ds/PKSM", 500, chestlink::PKSM_GENS, {}});
+  else
+    out.push_back(
+        {"PKSM (SD)", "sdmc:/3ds/PKSM", 500, chestlink::PKSM_GENS, {}});
   if (chestlink::exists("sdmc:/_nds/pkmn-chest"))
     out.push_back({"Chest (SD)",
                    "sdmc:/_nds/pkmn-chest",

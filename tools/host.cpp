@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
           "[PORTA]\n"
           "  chest-link-cli mail-fetch RAIZ IP PIN DESTINO ID [PORTA] "
           "[MAXBOXES]\n"
-          "DESTINO: 1=DS, 2=3DS. TODAS: 0=pendentes, 1=todas.");
+          "DESTINO: 0=PC sem destino, 1=DS, 2=3DS. TODAS: 0=pendentes, 1=todas.");
     Store store{"Host", argv[2], 500, PKSM_GENS, {}};
     std::string command = argv[1];
     recover(store);
@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
       try {
         if (command == "mail-send") {
           if (argc < 8)
-            throw Error("Informe destino 1=DS ou 2=3DS.");
+            throw Error("Informe destino 0=PC, 1=DS ou 2=3DS.");
           auto conn = Connection::connect(
               argv[5], argc > 8 ? std::stoul(argv[8]) : MAILBOX_PORT);
           auto w = conn.wire();

@@ -11,8 +11,10 @@ parser.add_argument("output", type=Path)
 args = parser.parse_args()
 apps = {
     "DS/ChestLink_DS.nds": ROOT / "platform/nds/ChestLink_DS.nds",
+    "DS/release.json": ROOT / "platform/nds/release.json",
     "3ds/ChestLink_3DS/ChestLink_3DS.3dsx": ROOT / "platform/3ds/ChestLink_3DS.3dsx",
     "3ds/ChestLink_3DS/ChestLink_3DS.smdh": ROOT / "platform/3ds/ChestLink_3DS.smdh",
+    "3ds/ChestLink_3DS/release.json": ROOT / "platform/3ds/release.json",
 }
 server = {
     "PC/servidor.py": ROOT / "server/chest_link_server.py",
@@ -28,7 +30,7 @@ files = {**apps, **server}
 for p in apps.values():
     if not p.is_file():
         raise SystemExit(f"Compile primeiro: arquivo ausente {p}")
-prefix = "Chest_Link_v0.3/"
+prefix = "Chest_Link_v0.4.3/"
 args.output.parent.mkdir(parents=True, exist_ok=True)
 extensions = {".cpp", ".hpp", ".h", ".py", ".md", ".txt", ".png", ".gif", ".sh", ".bat", ".html", ".css", ".js", ".json"}
 with zipfile.ZipFile(args.output, "w", zipfile.ZIP_DEFLATED) as archive:

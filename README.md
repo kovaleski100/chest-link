@@ -1,8 +1,8 @@
-# Chest Link 0.3
+# Chest Link 0.4.3
 
-App independente com a **interface de armazenamento do PKSM adaptada para PC, DS/DSi e 3DS**, para copiar Pokémon selecionados ou uma ou várias boxes entre os bancos do **Pokémon Chest no DS/DSi** e do **PKSM no 3DS**, pela rede local. Há uma versão `.nds`, uma versão `.3dsx` e uma **caixa postal no PC com interface gráfica**, feita em Python e aberta no navegador local. Ambos os consoles podem enviar e receber diretamente ou pelo PC.
+App independente com a **interface de armazenamento do PKSM adaptada para PC, DS/DSi e 3DS**, para copiar Pokémon selecionados ou uma ou várias boxes entre os bancos do **Pokémon Chest no DS/DSi** e do **PKSM no 3DS**, pela rede local. Há uma versão `.nds`, uma versão `.3dsx` e uma **caixa postal no PC com interface gráfica**, feita em Python e aberta no navegador. A página também pode ser acessada por outros computadores na mesma rede local. Ambos os consoles podem enviar e receber diretamente ou pelo PC.
 
-O PC funciona como a secretária que tu pediste: recebe e guarda as boxes quando o outro console está desligado. Para uma transferência direta, o destino fica na tela inicial e o listener pergunta automaticamente se deve aceitar; o PC também pode enviar diretamente ao listener informando IP e PIN. O PC conserva o backup mesmo após a entrega.
+O PC funciona como a secretária que tu pediste: recebe e guarda as boxes quando o outro console está desligado. O listener dos consoles fica aberto, mas não busca cópias na caixa postal. Um envio ao console só começa quando tu escolhes **Enviar seleção ao DS/3DS** na interface do PC; o console ainda pede confirmação antes de gravar. O PC conserva o backup após a entrega.
 
 **Esta é uma versão experimental. Os executáveis foram compilados e os testes no PC passaram. Wi-Fi, carregamento e gravação nos consoles reais ainda precisam de validação. Na primeira execução, mantém os backups que tu já tens e testa uma única box.**
 
@@ -13,6 +13,7 @@ O app lê os bancos de armazenamento do Chest e do PKSM. Para transferir Pokémo
 | Arquivo ou pasta | Uso |
 |---|---|
 | `DS/ChestLink_DS.nds` | App para DS, DS Lite ou DSi |
+| `DS/release.json` | Versão e hash do app DS publicados pelo servidor |
 | `3ds/ChestLink_3DS/ChestLink_3DS.3dsx` | App para o Homebrew Launcher do 3DS |
 | `3ds/ChestLink_3DS/ChestLink_3DS.smdh` | Ícone e identificação no launcher |
 | `PC/servidor.py` | Servidor da caixa postal, Python 3.9 ou superior, sem pacotes adicionais |
@@ -27,11 +28,11 @@ O app lê os bancos de armazenamento do Chest e do PKSM. Para transferir Pokémo
 
 | Opções no Chest Link | Quem precisa estar ligado |
 |---|---|
-| **Enviar ao console** | O destino abre Chest Link e aguarda o listener; a confirmação aparece automaticamente |
+| **Enviar ao outro console** | O destino abre Chest Link e aguarda; a confirmação aparece quando a origem inicia o envio direto |
 | **Enviar ao PC** | Console de origem e PC com o servidor aberto |
 | **Enviar do PC ao console** | PC e console de destino com Chest Link aberto; informa IP/PIN do listener |
 
-Essas opções copiam as boxes que tu selecionas. O destino recebe um banco `linkNNNN`, e os bancos existentes são preservados. A escolha **Enviar ao PC** encaminha a cópia para a caixa postal; a entrega automática ocorre quando o console já tem IP/PIN do PC salvos. Para a primeira entrega a um console sem essa configuração, usa o envio direto do PC com o IP/PIN mostrados pelo listener.
+Essas opções copiam as boxes que tu selecionas. O destino recebe um banco `linkNNNN`, e os bancos existentes são preservados. **Enviar ao PC** guarda uma cópia sem destinatário definido. Na interface do PC, escolhe DS ou 3DS ao iniciar o envio; é nesse momento que o servidor valida a compatibilidade. A caixa postal não envia nem solicita a cópia sozinha. No envio direto entre consoles, o destino é inferido pelo aparelho que está recebendo.
 
 ## Instalação — feita no PC, uma vez
 
@@ -41,7 +42,17 @@ Essas opções copiam as boxes que tu selecionas. O destino recebe um banco `lin
 4. **Cartão do 3DS:** copia a pasta `3ds/ChestLink_3DS` do pacote para a pasta `3ds` do cartão. O resultado deve ser `SD:/3ds/ChestLink_3DS/ChestLink_3DS.3dsx`, com o `.smdh` ao lado. No console, abre **Chest Link** pelo Homebrew Launcher.
 5. Recoloca os cartões nos consoles. Para a ligação direta, abre Chest Link nos dois aparelhos; o destino não precisa de um botão de recebimento. Para a caixa postal, prepara o servidor do PC conforme a seção seguinte.
 
-Se tu já instalaste a versão 0.1 ou 0.2, substitui os arquivos `.nds`, `.3dsx` e `.smdh` pelos deste pacote. No PC, atualiza **todos os arquivos da pasta PC**, incluindo `interface.py`, `pokemon.py` e a pasta `web`, conservando a tua pasta `dados`. Os nomes e caminhos dos apps continuam iguais.
+### Atualização pela rede (DS e 3DS)
+
+O menu inicial de ambos os apps oferece **Atualizar pelo PC**. O servidor precisa ser da versão **0.4.3 ou mais recente** e incluir o `.nds`/`.3dsx` e o `release.json` correspondentes. Os dois consoles pedem IP e PIN do PC na primeira vez e guardam esses dados para as próximas atualizações.
+
+No DS, se houver SD interno e flashcard disponíveis, escolhe onde salvar. O app baixa e verifica o `.nds` e grava uma nova cópia, com o número da versão no nome (por exemplo, `ChestLink_DS_v0.4.4.nds`), na raiz do dispositivo. Abre esse arquivo pelo menu do SD/flashcard para usar a versão nova. O app não apaga nem tenta adivinhar o caminho da cópia que iniciou, e cada versão baixada fica separada.
+
+No 3DS, o `.3dsx` é instalado no caminho usado pelo Homebrew Launcher (`SD:/3ds/ChestLink_3DS/ChestLink_3DS.3dsx`) e a versão anterior fica ao lado como `.previous`. Depois de atualizar, sai e abre o Chest Link novamente.
+
+Em ambos os consoles, o download só começa após confirmação. Ele é gravado temporariamente, validado por SHA-256 e instalado só se a verificação passar. O PIN e o hash detectam erro de transmissão, mas não substituem uma assinatura do desenvolvedor; usa somente um servidor confiável na tua rede. Versões anteriores à 0.4.3 precisam receber esta atualização inicial pelo SD/flashcard.
+
+Se tu já instalaste uma versão anterior à 0.4.3, substitui os arquivos `.nds`, `.3dsx` e `.smdh` pelos deste pacote. No PC, atualiza **todos os arquivos da pasta PC**, incluindo `interface.py`, `pokemon.py`, os dois executáveis de console e seus `release.json`, conservando a tua pasta `dados`. O servidor detecta mudanças nos arquivos Python, espera a atualização terminar e reinicia sozinho; o PIN, os backups e o link da interface permanecem iguais.
 
 ## Iniciar a secretária — feito no PC
 
@@ -57,14 +68,18 @@ Se tu já instalaste a versão 0.1 ou 0.2, substitui os arquivos `.nds`, `.3dsx`
 
 4. **Windows:** abre a pasta **PC** e dá dois cliques em **iniciar-windows.bat**. Se preferires o terminal, abre-o nessa pasta e executa `py -3 servidor.py`.
 5. O navegador abrirá a **interface gráfica de boxes** automaticamente. A janela do terminal também mostrará **IP do PC**, **PIN** de seis dígitos e **porta TCP 40992**. A interface gráfica também exibe esses números no topo. Esses são os números que tu vais informar nos consoles. Se houver mais de um IP, escolhe o da rede local em que estão os consoles.
-6. Se o navegador não abrir, copia o link **Interface de boxes neste PC** exibido no terminal e abre-o no navegador desse mesmo PC. Esse link inclui a chave da interface; usa o link completo. A interface não precisa de internet.
+6. Para abrir a página em outro computador da mesma rede, copia um dos links em **Acesso pela rede local** exibidos no terminal e cola-o no navegador. Usa o link completo, que inclui a chave privada da interface. Não é necessário abrir terminal nem executar comandos no outro computador. A interface não precisa de internet.
 7. Deixa a janela do terminal aberta enquanto um console estiver enviando ou buscando. O PC pode estar ligado ao roteador por Wi-Fi ou cabo de rede, desde que consiga comunicar-se com os consoles na mesma rede local.
+
+Na interface aberta **no próprio PC**, o painel **Consoles DS e 3DS** pode iniciar uma rede temporária para os consoles, sem alterar o roteador. A rede é aberta para compatibilidade com DS/DS Lite; dispositivos próximos poderão usar a internet do PC. O acesso dos consoles à rede privada e aos outros serviços do PC permanece bloqueado. A comunicação direta entre consoles fica habilitada. Todos os consoles que precisam comunicar entre si devem entrar nessa mesma rede. O sistema pode pedir autorização para configurar o Wi-Fi. Ao terminar, encerra a rede pelo mesmo botão.
 
 O servidor cria a pasta **PC/dados**. Ela contém o PIN salvo, as cópias completas e as marcações de entrega. O PIN é reutilizado nos próximos inícios. Para encerrar, aperta **Ctrl+C** na janela do PC. Para voltar a usar, inicia o mesmo servidor, na mesma pasta. As cópias continuam guardadas mesmo com o PC desligado; para um console buscar, liga o PC e abre o servidor novamente.
 
 **Conserva a pasta `dados` ao mudar ou atualizar o servidor.** Para usar uma pasta de dados existente em outro local, inicia com `python3 servidor.py --data "/caminho/para/dados"` no Linux, ou `py -3 servidor.py --data "C:\\caminho\\para\\dados"` no Windows. O comando não altera a localização dos bancos nos consoles.
 
-Se o firewall do PC bloquear a conexão, permite a entrada do Python na rede privada/local ou libera **TCP 40992**. Usa a porta padrão: os apps dos consoles conectam-se à 40992. A ligação direta entre consoles usa a 40991.
+O servidor observa os seus arquivos Python e reinicia após uma alteração estável, preservando dados, PIN e link da interface. Uma futura atualização automática deve baixar e verificar o pacote em uma pasta temporária, criar `.chest-link-update-in-progress` ao lado de `servidor.py`, substituir os arquivos e remover esse marcador ao terminar. Assim, o processo só reinicia depois da instalação completa. O reinício automático não baixa versões por conta própria: a distribuição online ainda precisa de um endereço de releases e de um atualizador verificado.
+
+Se o firewall do PC bloquear conexões, permite a entrada do Python na rede privada/local ou libera **TCP 40992** para os consoles e **TCP 8765** para a interface web. A porta web pode ser alterada com `--web-port`; nesse caso, libera a porta configurada. A ligação direta entre consoles usa a porta 40991. O acesso web foi pensado para a rede local; não encaminhes essas portas para a Internet. Trata o link da interface como uma chave e compartilha-o apenas com quem deve ter acesso.
 
 O 3DS precisa de um ambiente homebrew já funcionando. O DS usa a mesma flashcard ou ambiente homebrew com que tu abres o Chest.
 
@@ -81,6 +96,8 @@ Configura os aparelhos para acessar **a mesma rede local**. O app usa TCP: **409
 
 Se tu tens um DS/DS Lite, um hotspot configurado apenas com WPA2 não resolve a conexão desse aparelho. Nesse caso, é necessária uma rede local compatível com o DS; uma rede temporária e separada pode cumprir essa função.
 
+Para usar a rede temporária do Chest Link, inicia-a na interface local do PC. No app do DS, escolhe **Configurar Wi-Fi**, seleciona a rede e aguarda o endereço IP. Essa escolha fica salva e o app tenta reconectar à mesma rede nas próximas aberturas; para trocar, volta a **Configurar Wi-Fi** e escolhe outra. O menu conecta redes abertas e redes protegidas cujas credenciais já estão salvas no console. Usa configuração automática de IP. Informa no Chest Link do console o IP do PC mostrado no painel. Para transferências diretas, conecta também o outro console à mesma rede; a comunicação entre clientes na TCP 40991 permanece habilitada. A comunicação com o servidor do PC usa TCP 40992. A rede compartilha a internet do PC, mas não permite que os consoles acessem a rede privada local.
+
 ## Preparar os Pokémon — feito no Chest ou no PKSM
 
 1. Abre o app que contém os Pokémon que tu queres enviar.
@@ -90,19 +107,17 @@ Se tu tens um DS/DS Lite, um hotspot configurado apenas com WPA2 não resolve a 
 
 No DS, o app procura os bancos do Chest no SD interno e na flashcard. Se houver dois armazenamentos, ele permite escolher.
 
-No 3DS, as opções são:
+No 3DS, Chest Link lê a configuração do PKSM e abre automaticamente o armazenamento ativo. Com **Use ExtData** ligado (padrão), usa o ExtData; desligado, usa `/3ds/PKSM/banks` no SD. Não é necessário escolher entre **PKSM (ExtData)** e **PKSM (SD)**. A mesma detecção vale para consultar bancos e receber transferências.
 
-- **PKSM (ExtData):** usa o armazenamento interno de dados do PKSM, quando o 3DS permite acessá-lo.
-- **PKSM (SD):** usa os bancos da pasta `/3ds/PKSM/banks`. Escolhe esta opção quando **Use ExtData** está desligado no PKSM.
-- **Chest (SD):** aparece se o Chest também mantém bancos nesse cartão, por exemplo quando usado pelo TWiLight Menu++.
+**Chest (SD)** ainda aparece se o Chest também mantém bancos nesse cartão, por exemplo quando usado pelo TWiLight Menu++.
 
-Escolhe o armazenamento em que aparecem os mesmos bancos que tu usas no app original. Se o PKSM estiver usando ExtData e tu receberes em **PKSM (SD)**, a cópia ficará no SD e só aparecerá no PKSM quando ele estiver configurado para usar esse armazenamento.
-
-Se **PKSM (ExtData)** não aparecer, pode faltar permissão para montar esse arquivo ou não existir um cadastro de bancos nele. O caminho alternativo é desativar **Use ExtData** nas configurações do próprio PKSM, concluir e salvar a alteração para que o PKSM passe a usar os bancos no SD, e então usar **PKSM (SD)** no Chest Link. Confere os bancos em **Consultar bancos** antes do primeiro envio.
+Se a configuração do PKSM não puder ser lida, Chest Link usa o cadastro de bancos existente para inferir o armazenamento; se não houver informação suficiente, mantém o padrão do PKSM quando o ExtData estiver acessível. Confere os bancos em **Consultar bancos** antes do primeiro envio.
 
 ## Interface de boxes — PC e consoles
 
 A tela de armazenamento mantém **30 espaços por box, em 6 colunas e 5 linhas**, barra com o nome da box, sprites, cursor e resumo do Pokémon. Ao abrir **Consultar bancos**, a tela mostra as boxes e, embaixo, somente **Enviar ao PC** e **Enviar ao outro console**. O menu inicial contém apenas **Consultar bancos**, **Créditos** e **Sair**; o status do listener aparece nele. O PC usa um painel próprio, mais limpo, sem imitar a tela do PKSM.
+
+Na interface do PC, a aba **Pokédex** inclui as 151 espécies da primeira geração. Escolhe **Geração I**, depois Red, Blue ou Yellow pelas capas; a lista pode mostrar apenas as espécies obtíveis naquela versão ou todos os 151. A ficha inclui linha evolutiva e método de evolução, locais de encontro, busca e filtros por tipo/exclusividade, além de progresso **unificado** ou **individual**. O sprite fica colorido quando uma cópia verificada no servidor contém a espécie; esse indicador automático é separado da marcação manual de captura. A Pokédex funciona offline e preserva o progresso na pasta de dados do servidor.
 
 | Ação no DS/3DS | Controle |
 |---|---|
@@ -118,7 +133,7 @@ Em **Consultar bancos**, **A** ou um toque no Pokémon marca ou desmarca a sele�
 
 No PC:
 
-1. **No console**, salva e fecha Chest/PKSM, abre Chest Link e usa **Enviar ao PC**. Escolhe o destinatário DS ou 3DS e conclui o envio. O outro console pode estar desligado.
+1. **No console**, salva e fecha Chest/PKSM, abre Chest Link e usa **Enviar ao PC**. Não escolhe um destinatário nessa etapa; o outro console pode estar desligado.
 2. **No PC**, a cópia aparece na lista **Bancos guardados no PC**. Seleciona o banco nessa lista.
 3. **No PC**, escolhe a box no campo **Box** ou nas setas do painel inferior. Clica no Pokémon para marcá-lo. **Box inteira** marca os 30 espaços; **Todas** marca todas as boxes do banco. A parte inferior destaca a seleção.
 4. **No PC**, clica **Enviar seleção ao DS** ou **Enviar seleção ao 3DS**, informa o IP e o PIN mostrados na tela inicial do console e confirma. O console perguntará se aceita a transferência antes de gravar; o PC também mantém o backup.
@@ -126,18 +141,18 @@ No PC:
 
 O teclado do PC também permite navegar: depois de clicar no painel inferior, usa as setas para o cursor, **A** ou **Espaço** para marcar, **Y** para a box, **X** para todas e **L/R** para trocar a box. Os contadores de seleção mostram espaços marcados; a confirmação da transferência informa quantos Pokémon realmente estão presentes.
 
-Para iniciar somente o servidor, sem interface, usa `python3 servidor.py --no-ui`. `--no-browser` mantém a interface disponível pelo link exibido, sem abrir o navegador automaticamente. A interface fica disponível somente no próprio PC; a comunicação com os consoles continua na porta TCP 40992.
+Para iniciar somente o servidor, sem interface, usa `python3 servidor.py --no-ui`. `--no-browser` mantém a interface disponível pelos links exibidos, sem abrir o navegador automaticamente. Por padrão, a interface aceita conexões na rede local; usa `--web-bind 127.0.0.1` para restringi-la ao próprio PC. A comunicação com os consoles continua na porta TCP 40992.
 
 ## DS → PC → 3DS — o 3DS pode estar desligado durante o envio
 
 1. **No PC:** inicia `servidor.py` como explicado acima. Deixa a janela aberta e anota o IP e o PIN mostrados nela.
 2. **No DS/DSi:** depois de salvar e fechar o Chest, abre Chest Link e escolhe **Enviar ao PC**.
 3. **No DS/DSi:** escolhe o armazenamento, se aparecer essa pergunta, e o banco do Chest. A grade mostra os 30 espaços da box e os sprites dos Pokémon. Usa o direcional para mover o cursor e **A** para marcar um Pokémon; **Y** marca a box inteira e **X** marca todas as boxes. **L/R** troca a box. Aperta **START** ou toca **START: Enviar** para continuar.
-4. **No DS/DSi:** confirma as quantidades. Na pergunta sobre qual console receberá depois, escolhe **3DS / PKSM**.
+4. **No DS/DSi:** confirma as quantidades. O app guarda a cópia no PC sem atribuir um console destinatário; essa escolha é feita na interface do PC.
 5. **No DS/DSi:** informa o **IP do PC**, confirma com **A** e informa o **PIN do PC**. Esquerda/direita muda o campo; cima/baixo altera o valor. O app lembra o IP e o PIN do servidor para os próximos usos.
 6. **No DS/DSi:** aguarda **PC confirmou a copia** e o ID mostrado. Essa confirmação significa que a cópia completa foi conferida e publicada na pasta de dados. A origem continua intacta. Agora tu podes desligar o DS; o 3DS não precisava estar ligado.
 7. **Depois, no PC:** deixa ou abre novamente o mesmo servidor. Se tu desligaste o PC, as boxes estarão na mesma pasta de dados quando ele voltar.
-8. **No 3DS:** abre Chest Link; o listener mostra IP e PIN na tela inicial. Se o 3DS já tiver IP/PIN do PC salvos, uma cópia pendente será oferecida automaticamente.
+8. **No 3DS:** abre Chest Link e deixa o listener ativo; anota o IP e PIN mostrados na tela inicial. O app não busca cópias na caixa postal.
 9. **No PC:** na interface, escolhe a cópia, clica **Enviar seleção ao 3DS** e informa o IP/PIN do listener do 3DS.
 10. **No 3DS:** confirma a transferência. Aguarda a gravação e anota o banco indicado, como **link0001**.
 11. **No 3DS:** fecha Chest Link, abre o PKSM e seleciona esse banco. O servidor mantém o backup original.
@@ -146,27 +161,29 @@ Para iniciar somente o servidor, sem interface, usa `python3 servidor.py --no-ui
 
 1. **No PC:** deixa o servidor aberto.
 2. **No 3DS:** salva e fecha PKSM, abre Chest Link e escolhe **Enviar ao PC**.
-3. **No 3DS:** escolhe o armazenamento correto do PKSM e o banco. Marca Pokémon com **A**, a box inteira com **Y**, ou todas com **X**; **L/R** troca a box. Usa **START** ou o botão de envio na tela para continuar. Confirma e escolhe **DS / Pokemon Chest** como destinatário.
+3. **No 3DS:** escolhe o armazenamento correto do PKSM e o banco. Marca Pokémon com **A**, a box inteira com **Y**, ou todas com **X**; **L/R** troca a box. Usa **START** ou o botão de envio na tela para continuar e confirma. O destinatário será definido depois, no PC.
 4. **No 3DS:** informa o IP/PIN do **PC** e aguarda a confirmação de que ele guardou a cópia. Depois podes desligar o 3DS.
 5. **Mais tarde, no DS/DSi:** abre Chest Link e deixa o listener visível na tela inicial.
 6. **No PC:** seleciona a cópia, clica **Enviar seleção ao DS**, informa o IP/PIN do DS e aguarda a confirmação no console. Depois, abre o Chest e seleciona o banco indicado.
 
-Para um destino em flashcard/modo DS, envia no máximo **50 boxes de cada vez**. Um pacote maior pode ficar guardado no PC, mas será recusado por esse destino. Gerações que o Chest não aceita são recusadas antes do envio para sua fila.
+Para um destino em flashcard/modo DS, envia no máximo **50 boxes de cada vez**. Um pacote maior pode ficar guardado no PC, mas será recusado se escolheres esse destino. Gerações incompatíveis também são verificadas ao iniciar o envio no PC; a cópia original permanece guardada.
 
 ## Cópias de segurança no PC
 
-O PC mantém todos os backups na interface. A entrega direta ao console usa o listener; se uma transferência já tiver sido enfileirada, o console pode recebê-la automaticamente quando seus dados de conexão do PC estiverem salvos.
+O PC mantém todos os backups na interface. Uma cópia enviada pelo console fica sem destinatário até tu clicares em **Enviar seleção ao DS** ou **Enviar seleção ao 3DS**. O listener espera uma conexão iniciada por esse envio manual; ele não consulta o PC nem puxa cópias da caixa postal.
 
 Quando um console recebe uma cópia do PC, o backup original continua disponível na lista e pode ser reenviado.
 
-O console verifica cópias pendentes automaticamente se já tiver o IP e o PIN do PC salvos. Se encontrar uma, pergunta antes de receber. Repetir o mesmo envio reutiliza um banco `linkNNNN` que ainda tenha exatamente o mesmo conteúdo e os mesmos nomes de boxes. Se tu já editaste esse banco ou moveste Pokémon dele, uma nova cópia pode ser necessária e receberá outro nome.
+O botão **Limpar pendências** tira, após confirmação, os envios não entregues da fila do console. Os pacotes continuam guardados no PC, aparecem na Pokédex e podem ser selecionados e enviados novamente.
+
+No envio direto entre consoles, a confirmação aparece quando o console de origem inicia a transferência. No envio pelo PC, é a ação manual na interface que inicia a conexão; em ambos os casos, o destino confirma antes de gravar. Repetir o mesmo envio reutiliza um banco `linkNNNN` que ainda tenha exatamente o mesmo conteúdo e os mesmos nomes de boxes. Se tu já editaste esse banco ou moveste Pokémon dele, uma nova cópia pode ser necessária e receberá outro nome.
 
 O servidor guarda até **512 MiB e 1.000 pacotes** por padrão, contando também os entregues. Ele não apaga backups automaticamente. Se ficar cheio, podes reiniciá-lo com `python3 servidor.py --max-mib 1024 --max-items 2000`, por exemplo. No Windows, usa `py -3` em vez de `python3`.
 
 ## Transferir DS → 3DS — tudo daqui em diante é nos consoles
 
 1. **No 3DS**, abre Chest Link e deixa a tela inicial aberta. O listener mostrará **IP** e **PIN**.
-2. Escolhe **PKSM (ExtData)** ou **PKSM (SD)** conforme a configuração do teu PKSM.
+2. O 3DS já usa o armazenamento configurado no PKSM; não é preciso escolher ExtData ou SD.
 3. **No DS/DSi**, abre Chest Link e escolhe **Consultar bancos**.
 4. Escolhe o banco do Chest. Usa o direcional para navegar pelos **Pokémon** da box. **A** marca ou desmarca o Pokémon sob o cursor; também podes tocar no sprite na tela inferior. **Y** marca a box atual; **X** marca todas as boxes, ou limpa a seleção se todas já estiverem marcadas. **L/R** troca a box.
 5. Aperta **START** ou toca **START: Enviar** para preparar o envio. Confere a quantidade de boxes e Pokémon e confirma com **A**.
@@ -216,7 +233,7 @@ Se tu errares o PIN ou recusares a oferta, mantém Chest Link aberto no destino 
 - Até 500 boxes por banco no PKSM e no Chest em SD interno com modo DSi. O destino em flashcard/modo DS fica limitado a 50 por envio; divide a seleção em grupos menores se necessário.
 - No sentido **PKSM → Chest**, registros de gerações 1 e 2 são recusados para manter compatibilidade com o formato e leitor conferidos do Chest v2.2. Registros de gerações desconhecidas também são recusados.
 - Seleção individual, de boxes inteiras ou de todas as boxes, com grade 6 × 5 e sprites. A transferência preserva os dados e posições dos registros selecionados.
-- Esta é a interface **de armazenamento** do PKSM adaptada ao Chest Link. As ações são as de consulta, seleção e transferência; editores de atributos, saves, Pokédex, scripts e trocas de geração continuam sendo funções do Chest/PKSM.
+- A interface dos consoles é de **armazenamento e transferência**, sem editor de saves ou scripts. O PC também oferece a Pokédex básica e independente descrita acima; gerenciamento avançado continua sendo função do Chest/PKSM.
 - As 898 espécies até a geração VIII têm ícones offline. Há ícones adicionais para 20 formas comuns. As demais formas usam o ícone básico e conservam o número de forma no resumo e todos os dados na transferência. Um registro cujo resumo não puder ser lido aparece como **Registro** e continua preservado na cópia.
 - O PC mostra as cópias já enviadas ao servidor. Bancos dos consoles são lidos pelo app no respectivo console; para vê-los no PC, envia uma cópia ao PC. O PC não consulta um console desligado.
 - O importador para quando o cadastro já tem 89 bancos, para manter o seletor dos apps utilizável.

@@ -29,6 +29,14 @@ struct Touch {
 Touch touch(); // Virtual 320x240 coordinates on the bottom screen.
 void present(const uint16_t *top, unsigned topWidth, const uint16_t *bottom);
 void network();
+#ifdef CL_NDS
+// Scan nearby networks, connect to the user's selected supported access point,
+// and remember it so later launches reconnect to that same network. Calling
+// this again lets the user switch networks.
+std::string configureNetwork();
+bool usingChestLinkHotspot();
+std::string chestLinkHotspotServerIP();
+#endif
 std::string ip();
 uint32_t makePin();
 uint64_t milliseconds();

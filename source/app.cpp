@@ -4,6 +4,8 @@
 #include "network.hpp"
 #include "platform.hpp"
 #include "pokemon.hpp"
+#include "update.hpp"
+#include "version.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <memory>
@@ -14,8 +16,7 @@ struct DirectListener {
   int server = -1;
   uint32_t pin = 0;
   std::string ip;
-  std::string status = "Recepcao direta indisponivel";
-  uint64_t lastMailboxPoll = 0;
+  std::string status = "Escolha Configurar Wi-Fi";
 };
 DirectListener directListener;
 bool handlingIncoming = false;
@@ -113,9 +114,14 @@ std::string generations(uint32_t mask) {
 }
 const char *otherConsole();
 std::string settingsRoot(const Store &store) {
-  // ExtData commits can fail while persisting disposable connection settings.
-  // Keep these preferences on SD; bank imports still commit ExtData durably.
-  return store.commit ? "sdmc:/3ds/ChestLink" : store.work();
+  // Keep 3DS connection preferences on SD, independent of which PKSM bank is
+  // open. Bank reads/writes still use the explicitly selected store.
+#ifdef CL_3DS
+  (void)store;
+  return "sdmc:/3ds/ChestLink";
+#else
+  return store.work();
+#endif
 }
 struct SelectionResult {
   TransferAction action = TransferAction::cancel;
@@ -381,32 +387,27 @@ void transferSelection(Store &store, const Bank &bank,
         (result.action == TransferAction::pc
              ? "\n\nA origem permanece intacta.\nDeixe o servidor do PC aberto."
              : "\n\nA origem permanece intacta.\nO outro console fica "
-               "escutando automaticamente.");
+               "escutando; a confirmacao aparece quando ele receber.");
     if (!confirm("Enviar estas boxes?", desc)) {
       discard(p);
       return;
     }
     if (result.action == TransferAction::pc) {
-      int destination = choose("Guardar no PC para qual console?",
-                               {"DS / Pokemon Chest", "3DS / PKSM"});
-      if (destination < 0) {
-        discard(p);
-        return;
-      }
-      uint32_t target = destination == 0 ? TARGET_DS : TARGET_3DS;
       platform::network();
       std::string ip = inputIP(store, true);
       uint32_t pin = inputPIN(&store);
       title("Conectando...");
       auto conn = Connection::connect(ip, MAILBOX_PORT);
       auto wire = conn.wire();
-      std::string id = uploadMailbox(wire, pin, target,
+      // The recipient is chosen later from the PC interface. Zero keeps the
+      // copy unassigned until a DS/3DS send action validates its generations.
+      std::string id = uploadMailbox(wire, pin, 0,
                                       store.label + ": " + bankName, p,
                                       progress("Enviando ao PC"));
       discard(p);
-      message("PC confirmou a copia.\nID: " + id.substr(0, 8) +
-              "\n\nDepois, no console de destino, abra Chest Link.\n"
-              "A copia continua na origem.");
+      message("PC guardou a copia.\nID: " + id.substr(0, 8) +
+              "\n\nEscolhe DS ou 3DS na interface do PC para encaminhar.\n"
+              "A origem continua intacta.");
       return;
     }
     platform::network();
@@ -470,47 +471,114 @@ bool savedPCConnection(const Store &store, std::string &ip, uint32_t &pin) {
   }
 }
 
-void serviceMailbox() {
-  uint64_t now = platform::milliseconds();
-  if (now - directListener.lastMailboxPoll < 3000)
-    return;
-  directListener.lastMailboxPoll = now;
-#ifdef CL_NDS
-  constexpr uint32_t target = TARGET_DS;
-#else
-  constexpr uint32_t target = TARGET_3DS;
-#endif
-  for (const auto &store : platform::stores()) {
-    std::string ip;
-    uint32_t pin = 0;
-    if (!savedPCConnection(store, ip, pin))
-      continue;
-    try {
-      auto connection = Connection::connect(ip, MAILBOX_PORT, 500);
-      auto wire = connection.wire();
-      MailboxPage page = listMailbox(wire, pin, target, false);
-      if (page.items.empty())
-        continue;
-      const MailboxItem &item = page.items.front();
-      std::string description =
-          item.label + "\n" + std::to_string(item.offer.boxes) +
-          " boxes / " + std::to_string(item.offer.occupied) +
-          " Pokemon\n\nAceitar esta transferencia?";
-      if (!confirm("Transferencia recebida", description))
-        return;
-      auto incoming = Connection::connect(ip, MAILBOX_PORT);
-      auto incomingWire = incoming.wire();
-      auto accept = [](const Offer &) { return true; };
-      MailboxReceipt receipt = fetchMailbox(
-          incomingWire, pin, target, item.id, store, accept,
-          progress("Recebendo do PC"));
-      std::string name = receipt.bank;
-      message("Copia conferida e gravada.\n\nBanco novo: " + name +
-              "\n\nO banco já está disponível no armazenamento escolhido.");
-      return;
-    } catch (const Error &) {
-      // A saved PC may be offline. The next poll retries silently.
+void updateApplication() {
+  std::string ip;
+  uint32_t pin = 0;
+  std::string installPath;
+#ifdef CL_3DS
+  auto stores = platform::stores();
+  if (stores.empty())
+    throw Error("Nenhum armazenamento disponivel para as configuracoes.");
+  Store settings = stores.front();
+  bool haveConnection = false;
+  for (const auto &store : stores) {
+    if (savedPCConnection(store, ip, pin)) {
+      settings = store;
+      haveConnection = true;
+      break;
     }
+  }
+  if (!haveConnection) {
+    // Reuses old per-store preferences as a fallback, but writes new settings
+    // to the dedicated SD config path. Updating never asks which bank to open.
+    ip = inputIP(settings, true);
+    pin = inputPIN(&settings);
+  }
+  installPath = "sdmc:/3ds/ChestLink_3DS/ChestLink_3DS.3dsx";
+#else
+  auto stores = platform::stores();
+  if (stores.empty())
+    throw Error("Nenhum armazenamento disponivel para instalar a atualizacao.");
+  unsigned selected = 0;
+  if (stores.size() > 1) {
+    std::vector<std::string> options;
+    for (const auto &store : stores)
+      options.push_back(store.label);
+    int choice = choose("Salvar atualizacao em", options);
+    if (choice < 0)
+      return;
+    selected = static_cast<unsigned>(choice);
+  }
+  Store settings = stores[selected];
+  std::string device = "/";
+  auto mount = settings.root.find(":/");
+  if (mount != std::string::npos)
+    device = settings.root.substr(0, mount + 2);
+  // NDS launchers do not consistently expose the path of the running .nds.
+  // The accepted version determines a new filename, so the running copy stays
+  // untouched and can be relaunched if the downloaded file has a problem.
+  if (!savedPCConnection(settings, ip, pin)) {
+#ifdef CL_NDS
+    if (platform::usingChestLinkHotspot())
+      pin = inputPIN(&settings);
+    else {
+#endif
+    ip = inputIP(settings, true);
+    pin = inputPIN(&settings);
+#ifdef CL_NDS
+    }
+#endif
+  }
+#endif
+  platform::network();
+#ifdef CL_NDS
+  if (platform::usingChestLinkHotspot()) {
+    const std::string hotspotIP = platform::chestLinkHotspotServerIP();
+    if (hotspotIP.empty())
+      throw Error("Nao consegui ler o endereco do PC na rede ChestLink-DS.");
+    ip = hotspotIP;
+  }
+#endif
+  title("Conectando ao servidor...");
+  auto connection = Connection::connect(ip, MAILBOX_PORT);
+  auto wire = connection.wire();
+  auto accept = [&installPath
+#ifndef CL_3DS
+                 , &device
+#endif
+  ](uint32_t remote, uint32_t bytes, uint32_t local) {
+#ifndef CL_3DS
+    installPath = device + "ChestLink_DS_v" + appVersionText(remote) + ".nds";
+#endif
+    std::string details = "Versao instalada: " + appVersionText(local) +
+                         "\nNova versao: " + appVersionText(remote) +
+                         "\nTamanho: " + std::to_string(bytes / 1024) +
+                         " KiB\n\nDestino: " + installPath +
+                         "\n\nBaixar e instalar agora?";
+    return confirm("Atualizacao disponivel", details);
+  };
+#ifdef CL_3DS
+  UpdateResult update = update3DS(wire, pin, APP_VERSION_CODE, installPath,
+                                  accept, progress("Baixando atualizacao"));
+#else
+  UpdateResult update = updateNDS(wire, pin, APP_VERSION_CODE, installPath,
+                                  accept, progress("Baixando atualizacao"));
+#endif
+  if (update.state == UpdateState::current) {
+    message("Chest Link ja esta atualizado.\nVersao no servidor: " +
+            appVersionText(update.version));
+  } else if (update.state == UpdateState::installed) {
+#ifdef CL_3DS
+    message("Atualizacao " + appVersionText(update.version) +
+            " instalada e conferida.\n\nSaia do Homebrew Launcher e abra "
+            "o Chest Link novamente.\nA versao anterior foi preservada ao "
+            "lado do app.");
+#else
+    message("Atualizacao " + appVersionText(update.version) +
+            " instalada e conferida.\n\nNova copia: " + installPath +
+            "\nAbra esse arquivo pelo menu da flashcard/SD.\nO app atual e a "
+            "copia anterior permanecem preservados.");
+#endif
   }
 }
 
@@ -518,10 +586,8 @@ void serviceIncoming() {
   if (handlingIncoming || directListener.server < 0)
     return;
   auto conn = Connection::tryAccept(directListener.server);
-  if (!conn) {
-    serviceMailbox();
+  if (!conn)
     return;
-  }
   handlingIncoming = true;
   try {
     receiveConnection(*conn);
@@ -542,9 +608,25 @@ void startListener() {
     directListener.status = "IP " + directListener.ip + " PIN " + pinText;
   } catch (const std::exception &e) {
     directListener.server = -1;
+#ifdef CL_NDS
+    directListener.status =
+        std::string(e.what()).find("Rede salva") != std::string::npos
+            ? "Rede salva indisponivel; Configurar Wi-Fi"
+            : "Wi-Fi nao conectado; Configurar Wi-Fi";
+#else
     directListener.status = "Recepcao direta indisponivel";
+#endif
   }
 }
+#ifdef CL_NDS
+void stopListener() {
+  Connection::close(directListener.server);
+  directListener.server = -1;
+  directListener.pin = 0;
+  directListener.ip.clear();
+  directListener.status = "Escolha Configurar Wi-Fi";
+}
+#endif
 } // namespace
 int runApp() {
   try {
@@ -553,11 +635,63 @@ int runApp() {
       recover(store);
     startListener();
     while (platform::alive()) {
+#ifdef CL_3DS
+      int n = choose("Chest Link",
+                     {"Atualizar pelo PC", "Consultar bancos", "Creditos", "Sair"}, true);
+      if (n < 0 || n == 3)
+        break;
+#elif defined(CL_NDS)
+      int n = choose("Chest Link",
+                     {"Configurar Wi-Fi", "Atualizar pelo PC", "Consultar bancos",
+                      "Creditos", "Sair"}, true);
+      if (n < 0 || n == 4)
+        break;
+#else
       int n = choose("Chest Link",
                      {"Consultar bancos", "Creditos", "Sair"}, true);
       if (n < 0 || n == 2)
         break;
+#endif
       try {
+#ifdef CL_3DS
+        if (n == 0)
+          updateApplication();
+        else if (n == 1)
+          consult();
+        else
+          message(
+              "Chest Link: app independente.\nVisual PKSM / "
+              "FlagBrew.\nBernardo Giordano, Admiral Fish,\npiepie62 e "
+              "colaboradores.\nLeitura PKX: PKSM-Core.\nSprites: PokeAPI; "
+              "Pokemon pertence\na Nintendo, Creatures, GAME FREAK.\nGPL-3.0+: "
+              "atribuicao/origem mantidas.\nFontes e licencas no pacote.");
+#elif defined(CL_NDS)
+        if (n == 0) {
+          stopListener();
+          std::string ssid;
+          try {
+            ssid = platform::configureNetwork();
+          } catch (...) {
+            startListener();
+            throw;
+          }
+          startListener();
+          if (!ssid.empty()) {
+            message("Conectado a " + ssid + "\nIP do DS: " + platform::ip() +
+                    "\nA recepção direta fica ativa enquanto estiver nesta rede.");
+          }
+        } else if (n == 1)
+          updateApplication();
+        else if (n == 2)
+          consult();
+        else
+          message(
+              "Chest Link: app independente.\nVisual PKSM / "
+              "FlagBrew.\nBernardo Giordano, Admiral Fish,\npiepie62 e "
+              "colaboradores.\nLeitura PKX: PKSM-Core.\nSprites: PokeAPI; "
+              "Pokemon pertence\na Nintendo, Creatures, GAME FREAK. GPL-3.0+: "
+              "atribuicao/origem mantidas. Fontes e licencas no pacote.");
+#else
         if (n == 0)
           consult();
         else
@@ -567,6 +701,7 @@ int runApp() {
               "colaboradores.\nLeitura PKX: PKSM-Core.\nSprites: PokeAPI; "
               "Pokemon pertence\na Nintendo, Creatures, GAME FREAK.\nGPL-3.0+: "
               "atribuicao/origem mantidas.\nFontes e licencas no pacote.");
+#endif
       } catch (const std::exception &e) {
         message(e.what());
       }

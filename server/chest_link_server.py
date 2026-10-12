@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chest Link 0.3: durable TCP mailbox and clean local box interface.
+"""Chest Link 0.4.3: durable TCP mailbox and clean local box interface.
 
 No third-party packages. Run with Python 3.9 or newer. Bank files are never
 deleted on delivery; only the pending flag changes after the console's ACK.
@@ -26,12 +26,107 @@ PORT = 40992
 MAX_BOXES, BOX_BYTES, ENTRY = 500, 10080, 336
 MAX_NAMES = 256 * 1024
 PAGE_SIZE = 32
+UPDATE_MAGIC = b"CLUPD001"
+MAX_UPDATE_BYTES = 16 * 1024 * 1024
 ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 LOG = logging.getLogger("chest-link")
 
 
 class MailboxError(Exception):
     pass
+
+
+def find_console_update(console):
+    """Find a built console app whose release manifest matches its bytes."""
+    script = Path(__file__).resolve()
+    roots = (script.parent.parent, script.parent.parent.parent)
+    if console == "3DS":
+        relative_images = (Path("3ds/ChestLink_3DS/ChestLink_3DS.3dsx"),
+                           Path("codigo/platform/3ds/ChestLink_3DS.3dsx"))
+    elif console == "DS":
+        relative_images = (Path("DS/ChestLink_DS.nds"),
+                           Path("codigo/platform/nds/ChestLink_DS.nds"))
+    else:
+        raise ValueError("Console de atualizacao invalido.")
+    for root in roots:
+        images = tuple(root / relative for relative in relative_images)
+        for image in images:
+            manifest_path = image.with_name("release.json")
+            if not image.is_file() or not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                size = image.stat().st_size
+                digest = hashlib.sha256(image.read_bytes()).hexdigest()
+                if (not isinstance(manifest, dict) or set(manifest) !=
+                        {"format", "version", "size", "sha256"} or
+                        type(manifest["format"]) is not int or manifest["format"] != 1 or
+                        type(manifest["version"]) is not int or
+                        not 0 < manifest["version"] <= 0xffffff or
+                        type(manifest["size"]) is not int or manifest["size"] != size or
+                        not isinstance(manifest["sha256"], str) or
+                        not re.fullmatch(r"[0-9a-f]{64}", manifest["sha256"]) or
+                        manifest["sha256"] != digest or not 1 <= size <= MAX_UPDATE_BYTES):
+                    continue
+                return image, manifest["version"]
+            except (OSError, ValueError, TypeError):
+                continue
+    return None, 0
+
+
+def find_3ds_update():
+    return find_console_update("3DS")
+
+
+def find_nds_update():
+    return find_console_update("DS")
+
+
+def serve_update(sock, image, version, console="3DS"):
+    """Send a verified console app only after the PIN-authenticated client accepts."""
+    if image is None or not version:
+        reply(sock, f"Atualizacao {console} indisponivel neste pacote.", ok=False)
+        return
+    try:
+        source = image.open("rb")
+        size = source.seek(0, os.SEEK_END)
+        source.seek(0)
+        if not 1 <= size <= MAX_UPDATE_BYTES:
+            source.close()
+            reply(sock, f"Arquivo de atualizacao {console} invalido.", ok=False)
+            return
+        digest = hashlib.sha256()
+        while True:
+            block = source.read(64 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        checksum = digest.digest()
+        source.seek(0)
+    except OSError:
+        reply(sock, f"Nao foi possivel ler o app {console} no pacote do PC.", ok=False)
+        return
+
+    try:
+        reply(sock)
+        sock.sendall(struct.pack("<8sII32s", UPDATE_MAGIC, version, size, checksum))
+        decision, = struct.unpack("<I", exact(sock, 4))
+        if decision == 0:
+            return
+        if decision != 1:
+            raise MailboxError("Decisao de atualizacao invalida.")
+        reply(sock)
+        streamed = hashlib.sha256()
+        while True:
+            block = source.read(16 * 1024)
+            if not block:
+                break
+            sock.sendall(block)
+            streamed.update(block)
+        if streamed.digest() != checksum:
+            raise MailboxError(f"O arquivo {console} mudou durante o envio.")
+    finally:
+        source.close()
 
 
 def exact(sock, length):
@@ -59,8 +154,9 @@ def result(sock):
     return text
 
 
-def target_check(target):
-    if type(target) is not int or target not in (1, 2):
+def target_check(target, allow_unassigned=False):
+    allowed = (0, 1, 2) if allow_unassigned else (1, 2)
+    if type(target) is not int or target not in allowed:
         raise MailboxError("Destino invalido: escolha DS ou 3DS.")
 
 
@@ -76,7 +172,9 @@ def offer_encode(offer):
 
 
 def preflight(offer, target):
-    target_check(target)
+    # Target zero is a server-held copy whose recipient is intentionally
+    # unset. Compatibility is checked when the PC later chooses DS or 3DS.
+    target_check(target, allow_unassigned=True)
     numbers = ("boxes", "occupied", "generations", "bankBytes", "namesBytes")
     if (not isinstance(offer, dict) or set(offer) != {*numbers, "hash"} or
             any(type(offer[k]) is not int or not 0 <= offer[k] <= 0xffffffff for k in numbers) or
@@ -105,6 +203,42 @@ def no_duplicates(pairs):
             raise MailboxError("JSON com chaves duplicadas.")
         obj[key] = value
     return obj
+
+
+def watch_for_source_updates(paths, marker, stop_event, on_update,
+                            poll_interval=1.0, stable_checks=3):
+    """Restart only after installed Python sources settle outside an update."""
+    paths = tuple(Path(path) for path in paths)
+
+    def signature():
+        try:
+            return tuple((str(path), hashlib.sha256(path.read_bytes()).digest())
+                         for path in paths)
+        except OSError:
+            # A staged replacement may briefly remove a file. Wait for it.
+            return None
+
+    original = signature()
+    candidate = None
+    stable = 0
+    while not stop_event.wait(poll_interval):
+        if Path(marker).exists():
+            candidate, stable = None, 0
+            continue
+        current = signature()
+        if current is None:
+            candidate, stable = None, 0
+            continue
+        if current == original:
+            candidate, stable = None, 0
+            continue
+        if current == candidate:
+            stable += 1
+        else:
+            candidate, stable = current, 1
+        if stable >= stable_checks:
+            on_update()
+            return
 
 
 def json_read(path):
@@ -232,6 +366,8 @@ class Mailbox:
             if not config.exists() or pin is not None:
                 atomic_json(config, {"pin": self.pin})
             self.lock = threading.RLock()
+            self.delivery_lock = threading.RLock()
+            self.on_stored = None
             self.max_bytes, self.max_items = max_bytes, max_items
             self.reserved_bytes = self.reserved_items = 0
             # Refuse damaged metadata, leaving it in place for recovery.
@@ -253,6 +389,10 @@ class Mailbox:
             meta = json_read(folder / "meta.json")
             if meta["id"] != item_id or type(meta["delivered"]) is not int or meta["delivered"] not in (0, 1):
                 raise MailboxError("Metadados da copia invalidos.")
+            # Older packages predate this field and remain active in the queue.
+            meta.setdefault("queue_cleared", 0)
+            if type(meta["queue_cleared"]) is not int or meta["queue_cleared"] not in (0, 1):
+                raise MailboxError("Estado da fila invalido.")
             preflight(meta["offer"], meta["target"])
             if packet_id(meta["target"], meta["offer"]["hash"]) != item_id:
                 raise MailboxError("Identificador difere do hash gravado.")
@@ -269,6 +409,22 @@ class Mailbox:
     def all_metadata(self):
         return [self.metadata(p.name) for p in self.items.iterdir()
                 if p.is_dir() and ID_RE.fullmatch(p.name)]
+
+    def clear_pending(self):
+        """Remove pending routes from the queue while retaining server backups."""
+        with self.delivery_lock, self.lock:
+            rows = self.all_metadata()
+            pending = [meta for meta in rows
+                       if meta["target"] in (1, 2) and not meta["delivered"]
+                       and not meta["queue_cleared"]]
+            for meta in pending:
+                meta["queue_cleared"] = 1
+                atomic_json(self.items / meta["id"] / "meta.json", meta)
+            return [meta["id"] for meta in pending]
+
+    def notify_stored(self, folder, offer):
+        if self.on_stored is not None:
+            self.on_stored(folder, offer)
 
     @contextlib.contextmanager
     def reserve(self, size):
@@ -291,7 +447,7 @@ class Mailbox:
 
     def upload(self, sock):
         target, label_size = struct.unpack("<II", exact(sock, 8))
-        target_check(target)
+        target_check(target, allow_unassigned=True)
         if not 1 <= label_size <= 63:
             raise MailboxError("Rotulo do banco invalido.")
         label = exact(sock, label_size).decode("utf-8")
@@ -307,8 +463,13 @@ class Mailbox:
                 if meta["offer"] != offer:
                     raise MailboxError("Descricao difere da copia ja guardada.")
                 validate_package(final, offer, target)
-                reply(sock, "STORED " + item_id)
-                return
+                existing = True
+            else:
+                existing = False
+        if existing:
+            self.notify_stored(final, offer)
+            reply(sock, "STORED " + item_id)
+            return
         with self.reserve(offer["bankBytes"] + offer["namesBytes"]):
             temp = self.temp / uuid.uuid4().hex
             temp.mkdir()
@@ -325,7 +486,7 @@ class Mailbox:
                         os.fsync(stream.fileno())
                 validate_package(temp, offer, target)
                 meta = dict(id=item_id, target=target, label=label, offer=offer,
-                            created=int(time.time()), delivered=0)
+                            created=int(time.time()), delivered=0, queue_cleared=0)
                 json_write_new(temp / "meta.json", meta)
                 sync_dir(temp)
                 with self.lock:
@@ -338,8 +499,10 @@ class Mailbox:
                         os.rename(temp, final)
                         sync_dir(self.items)
                         sync_dir(self.temp)
+                self.notify_stored(final, offer)
                 reply(sock, item_id)
-                LOG.info("Guardado para %s: %s (%d boxes), ID %s", "DS" if target == 1 else "3DS", label, offer["boxes"], item_id[:8])
+                destination = {0: "PC, sem destinatario", 1: "DS", 2: "3DS"}[target]
+                LOG.info("Guardado para %s: %s (%d boxes), ID %s", destination, label, offer["boxes"], item_id[:8])
             finally:
                 if temp.exists():
                     shutil.rmtree(temp)
@@ -352,6 +515,7 @@ class Mailbox:
             raise MailboxError("Pedido de lista invalido.")
         with self.lock:
             rows = sorted((m for m in self.all_metadata() if (not target or m["target"] == target) and
+                           not m["queue_cleared"] and
                            (include_delivered or not m["delivered"])), key=lambda m: (m["created"], m["id"]))
             subset = rows[offset:offset + PAGE_SIZE]
             items = [dict(id=m["id"], target=m["target"], label=m["label"], delivered=m["delivered"], **m["offer"]) for m in subset]
@@ -361,6 +525,12 @@ class Mailbox:
         sock.sendall(struct.pack("<I", len(body)) + body)
 
     def fetch(self, sock):
+        # Keep an active console delivery from losing its files while the PC
+        # user clears the pending queue.
+        with self.delivery_lock:
+            return self._fetch_locked(sock)
+
+    def _fetch_locked(self, sock):
         target = struct.unpack("<I", exact(sock, 4))[0]
         target_check(target)
         item_id = exact(sock, 32).decode("ascii")
@@ -369,6 +539,8 @@ class Mailbox:
             raise MailboxError("Opcoes de recebimento invalidas.")
         with self.lock:
             meta = self.metadata(item_id)
+            if meta["queue_cleared"]:
+                raise MailboxError("Esta copia foi retirada da fila. Reenvie-a pelo PC para disponibiliza-la ao console.")
             if target != meta["target"]:
                 raise MailboxError("Esta copia pertence ao outro console.")
         folder = self.items / item_id
@@ -408,9 +580,17 @@ class Handler(socketserver.BaseRequestHandler):
             magic, version, pin, command = struct.unpack("<8sIII", exact(sock, 20))
             if magic != b"CLMAIL01" or version != 1 or pin != server.mailbox.pin:
                 raise MailboxError("PIN incorreto ou protocolo incompativel.")
-            if command not in (1, 2, 3):
+            if command not in (1, 2, 3, 4, 5):
                 raise MailboxError("Comando desconhecido.")
             reply(sock)
+            if command in (4, 5):
+                console = "3DS" if command == 4 else "DS"
+                try:
+                    image, version = server.update_for(command)
+                    serve_update(sock, image, version, console)
+                except (MailboxError, OSError, ValueError) as exc:
+                    LOG.warning("%s: atualizacao %s: %s", self.client_address[0], console, exc)
+                return
             {1: server.mailbox.upload, 2: server.mailbox.listing, 3: server.mailbox.fetch}[command](sock)
         except (MailboxError, OSError, ValueError, RecursionError) as exc:
             LOG.warning("%s: %s", self.client_address[0], exc)
@@ -425,13 +605,30 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
     # Wait for active transactions during shutdown; bodies time out normally.
     daemon_threads = False
 
-    def __init__(self, address, mailbox, timeout_seconds=180):
+    def __init__(self, address, mailbox, timeout_seconds=180,
+                 update_path=None, update_version=0,
+                 nds_update_path=None, nds_update_version=0):
         self.mailbox = mailbox
         self.timeout_seconds = timeout_seconds
+        self.update_path = Path(update_path) if update_path else None
+        self.update_version = update_version
+        self.nds_update_path = Path(nds_update_path) if nds_update_path else None
+        self.nds_update_version = nds_update_version
         self.active_lock = threading.Lock()
         self.active = set()
         self.closing = False
         super().__init__(address, Handler)
+
+    def update_for(self, command):
+        if command == 4:
+            if self.update_path:
+                return self.update_path, self.update_version
+            return find_3ds_update()
+        if command == 5:
+            if self.nds_update_path:
+                return self.nds_update_path, self.nds_update_version
+            return find_nds_update()
+        raise ValueError("Comando de atualizacao invalido.")
 
     def process_request(self, request, address):
         with self.active_lock:
@@ -494,23 +691,40 @@ def main():
     parser.add_argument("--max-items", type=int, default=1000, help="limite de copias, ate 10000")
     parser.add_argument("--no-ui", action="store_true", help="somente servidor TCP, sem interface grafica")
     parser.add_argument("--no-browser", action="store_true", help="inicia a interface sem abrir o navegador")
-    parser.add_argument("--web-port", type=int, default=8765, help="porta da interface local; 0 escolhe uma livre")
+    parser.add_argument("--web-port", type=int, default=8765, help="porta da interface web; 0 escolhe uma livre")
+    parser.add_argument("--web-bind", default="0.0.0.0",
+                        help="IPv4 de escuta da interface web; 0.0.0.0 permite acesso pela rede local")
     args = parser.parse_args()
     if not 1 <= args.max_items <= 10000 or args.max_mib < 1 or not 1 <= args.port <= 65535 or not 0 <= args.web_port <= 65535:
         parser.error("Limites ou porta invalidos.")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     mailbox = None
+    hotspot = None
+    restart_requested = threading.Event()
+    watch_stop = threading.Event()
+    watcher = None
     try:
         mailbox = Mailbox(args.data, args.pin, args.max_mib * 1024 * 1024, args.max_items)
+        if __package__:
+            from .ds_hotspot import DSHotspot
+        else:
+            from ds_hotspot import DSHotspot
+        hotspot = DSHotspot(args.port, args.bind)
+        update_path, update_version = find_3ds_update()
+        nds_update_path, nds_update_version = find_nds_update()
         with Server((args.bind, args.port), mailbox) as server:
             metas = mailbox.all_metadata()
-            print("\nCHEST LINK 0.3 - SERVIDOR DO PC", flush=True)
+            print("\nCHEST LINK 0.4.3 - SERVIDOR DO PC", flush=True)
             addresses = local_ips(args.bind)
             print("IP do PC: " + (" / ".join(addresses) or "consulte ipconfig ou ip addr no PC"))
             print(f"PIN: {mailbox.pin:06d}    Porta TCP: {args.port}")
             print(f"Dados: {mailbox.root}")
-            print(f"Pendentes DS: {sum(m['target'] == 1 and not m['delivered'] for m in metas)}; "
-                  f"3DS: {sum(m['target'] == 2 and not m['delivered'] for m in metas)}")
+            print("Atualizacao DS: " + (f"v{nds_update_version >> 16}.{(nds_update_version >> 8) & 255}.{nds_update_version & 255}"
+                                        if nds_update_path else "indisponivel neste pacote"))
+            print("Atualizacao 3DS: " + (f"v{update_version >> 16}.{(update_version >> 8) & 255}.{update_version & 255}"
+                                        if update_path else "indisponivel neste pacote"))
+            print(f"Pendentes DS: {sum(m['target'] == 1 and not m['delivered'] and not m['queue_cleared'] for m in metas)}; "
+                  f"3DS: {sum(m['target'] == 2 and not m['delivered'] and not m['queue_cleared'] for m in metas)}")
             print("Nos consoles: Enviar ao PC guarda uma fila; o PC pode enviar diretamente ao listener. Ctrl+C encerra.\n", flush=True)
             ui = None
             try:
@@ -520,18 +734,47 @@ def main():
                             from .interface import Interface
                         else:
                             from interface import Interface
-                        ui = Interface(sys.modules[__name__], mailbox, server.server_address, addresses, args.web_port)
+                        web_addresses = local_ips(args.web_bind)
+                        ui = Interface(sys.modules[__name__], mailbox, server.server_address,
+                                       addresses, args.web_port, args.web_bind, web_addresses,
+                                       hotspot=hotspot)
                         ui.start(not args.no_browser)
                         print("Interface de boxes neste PC: " + ui.url, flush=True)
+                        if ui.network_urls:
+                            print("Acesso pela rede local (abre um destes links no outro computador): " +
+                                  " / ".join(ui.network_urls), flush=True)
                     except (ImportError, OSError, ValueError) as exc:
                         if ui:
                             ui.close()
                         ui = None
+                        if hotspot:
+                            try:
+                                hotspot.close()
+                            except RuntimeError as cleanup_error:
+                                print(f"Rede DS precisa de limpeza manual: {cleanup_error}", flush=True)
                         print(f"Interface indisponivel: {exc}. Servidor TCP continua funcionando.", flush=True)
+                script = Path(__file__).resolve()
+
+                def request_restart():
+                    print("Atualizacao do servidor instalada; reiniciando e preservando os dados...", flush=True)
+                    restart_requested.set()
+                    server.shutdown()
+
+                watcher = threading.Thread(
+                    target=watch_for_source_updates,
+                    args=((script, script.with_name("interface.py"), script.with_name("pokemon.py"),
+                           script.with_name("ds_hotspot.py")),
+                          script.parent / ".chest-link-update-in-progress", watch_stop,
+                          request_restart),
+                    name="chest-link-update-watcher", daemon=True)
+                watcher.start()
                 server.serve_forever(poll_interval=0.25)
             finally:
+                watch_stop.set()
                 if ui:
                     ui.close()
+                if watcher:
+                    watcher.join(timeout=2)
     except KeyboardInterrupt:
         print("\nServidor encerrado. As copias permanecem na pasta de dados.")
     except (OSError, MailboxError, ValueError) as exc:
@@ -540,6 +783,8 @@ def main():
     finally:
         if mailbox:
             mailbox.close()
+    if restart_requested.is_set():
+        os.execv(sys.executable, [sys.executable, *sys.argv])
     return 0
 
 

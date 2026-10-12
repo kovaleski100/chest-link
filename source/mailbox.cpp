@@ -6,8 +6,9 @@
 namespace chestlink {
 namespace {
 using namespace wireio;
-void targetCheck(uint32_t target) {
-  if (target != TARGET_DS && target != TARGET_3DS)
+void targetCheck(uint32_t target, bool allowUnassigned = false) {
+  if (target != TARGET_DS && target != TARGET_3DS &&
+      !(allowUnassigned && target == 0))
     throw Error("Destino da caixa postal invalido.");
 }
 void hello(Wire &w, uint32_t pin, uint32_t command) {
@@ -65,7 +66,7 @@ std::string existingCopy(const Store &s, const Package &p, Progress progress) {
 }
 } // namespace
 std::string mailboxId(uint32_t target, const Digest &digest) {
-  targetCheck(target);
+  targetCheck(target, true);
   Sha256 sha;
   uint8_t b[4];
   put32(b, target);
@@ -76,7 +77,7 @@ std::string mailboxId(uint32_t target, const Digest &digest) {
 std::string uploadMailbox(Wire &w, uint32_t pin, uint32_t target,
                           const std::string &label, const Package &p,
                           Progress progress) {
-  targetCheck(target);
+  targetCheck(target, true);
   std::string display = safeDisplay(label, 63);
   if (display.empty())
     display = "Banco";
@@ -133,7 +134,7 @@ MailboxPage listMailbox(Wire &w, uint32_t pin, uint32_t target,
     i.id = field(item, "id", Json::STRING).string;
     i.label = field(item, "label", Json::STRING).string;
     i.target = field(item, "target", Json::NUMBER).number;
-    targetCheck(i.target);
+    targetCheck(i.target, true);
     if (target && i.target != target)
       throw Error("Fila do PC pertence ao outro console.");
     i.offer.boxes = field(item, "boxes", Json::NUMBER).number;
