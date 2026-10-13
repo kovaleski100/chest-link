@@ -2,18 +2,56 @@
 #include "graphics.hpp"
 #include "pksm_storage.hpp"
 #include "platform.hpp"
+#include "app_location.hpp"
+#include "network_state.hpp"
+#include "update.hpp"
 #include <3ds.h>
 #include <3ds/archive.h>
 #include <arpa/inet.h>
 #include <cstdio>
 #include <cstdlib>
-#include <malloc.h>
+#include <cstring>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
 namespace platform {
 static unsigned pressed = 0;
-static bool initialized = false, networkReady = false, extMounted = false;
-static void *socBuffer = nullptr;
+static bool initialized = false, extMounted = false;
 static Touch lastTouch;
+static std::string launchPath;
+void setLaunchPath(const char *path) {
+  launchPath = platform_detail::sdApplicationPath(path ? path : "");
+}
+std::string runningApplicationPath() {
+  if (!launchPath.empty()) return launchPath;
+  // Older launchers/3dslink may omit argv[0]. The confirmation screen shows
+  // this fallback, but cleanup never assumes it was the running executable.
+  return "sdmc:/3ds/ChestLink_3DS/ChestLink_3DS.3dsx";
+}
+std::string runningApplicationDirectory() {
+  return platform_detail::applicationDirectory(runningApplicationPath());
+}
+unsigned removePreviousApplicationVersions(uint32_t version, bool &complete) {
+  complete = true;
+  if (launchPath.empty()) return 0; // Cannot prove which copy to preserve.
+  unsigned removed = chestlink::removePrevious3DSUpdates(launchPath, version, complete);
+  const std::string directory = platform_detail::applicationDirectory(launchPath);
+  DIR *handle = opendir(directory.c_str());
+  if (!handle) { complete = false; return removed; }
+  while (dirent *entry = readdir(handle)) {
+    const std::string name = entry->d_name;
+    const std::string path = directory + name;
+    if (platform_detail::sameSDPath(path, launchPath) ||
+        !platform_detail::older3DSApp(name, version)) continue;
+    struct stat info{};
+    if (stat(path.c_str(), &info)) { complete = false; continue; }
+    if (!S_ISREG(info.st_mode)) continue;
+    if (!std::remove(path.c_str())) ++removed;
+    else complete = false;
+  }
+  closedir(handle);
+  return removed;
+}
 void init() {
   gfxInitDefault();
   gfxSetDoubleBuffering(GFX_TOP, false);
@@ -21,20 +59,15 @@ void init() {
   initialized = true;
   if (!chestlink::exists("sdmc:/"))
     throw chestlink::Error("Cartao SD nao encontrado.");
+  if (!launchPath.empty() && !chestlink::exists(launchPath)) launchPath.clear();
+  platform_detail::refresh3DSNetworkStatus(true);
   extMounted = mountPKSM();
   if (extMounted)
     chestlink::outputAllocator = allocatePKSM;
 }
 void shutdown() {
   chestlink::outputAllocator = {};
-  if (networkReady) {
-    socExit();
-    networkReady = false;
-  }
-  if (socBuffer) {
-    free(socBuffer);
-    socBuffer = nullptr;
-  }
+  platform_detail::shutdown3DSNetwork();
   if (extMounted) {
     unmountPKSM();
     extMounted = false;
@@ -64,6 +97,7 @@ void frame() {
   }
   if (hidKeysDown() & KEY_TOUCH)
     pressed |= TOUCH;
+  platform_detail::refresh3DSNetworkStatus();
   gfxFlushBuffers();
   gfxSwapBuffers();
   gspWaitForVBlank();
@@ -92,7 +126,11 @@ bool pollNetwork() {
   frame();
   return !(pressed & B);
 }
-uint64_t milliseconds() { return osGetTime(); }
+uint64_t milliseconds() {
+  const uint64_t ticks = static_cast<uint64_t>(svcGetSystemTick());
+  return (ticks / SYSCLOCK_ARM11) * 1000 +
+         (ticks % SYSCLOCK_ARM11) * 1000 / SYSCLOCK_ARM11;
+}
 uint32_t makePin() {
   return uint32_t((svcGetSystemTick() ^ osGetTime()) % 900000) + 100000;
 }
@@ -138,29 +176,19 @@ std::vector<chestlink::Store> stores() {
   return out;
 }
 void network() {
-  if (!networkReady) {
-    socBuffer = memalign(0x1000, 1024 * 1024);
-    if (!socBuffer)
-      throw chestlink::Error("Memoria insuficiente para Wi-Fi.");
-    Result r = socInit(static_cast<uint32_t *>(socBuffer), 1024 * 1024);
-    if (R_FAILED(r)) {
-      free(socBuffer);
-      socBuffer = nullptr;
-      throw chestlink::Error("Wi-Fi indisponivel. Ative-o e configure uma "
-                             "conexao nas definicoes do 3DS.");
-    }
-    networkReady = true;
-  }
-  if (!gethostid())
-    throw chestlink::Error(
-        "3DS sem IP. Conecte-o a mesma rede Wi-Fi do DS/DSi.");
+  platform_detail::require3DSNetwork();
+}
+const chestlink::NetworkStatus &networkStatus() {
+  return platform_detail::network3DSStatus();
 }
 std::string ip() {
-  in_addr a{};
-  a.s_addr = gethostid();
-  const char *p = inet_ntoa(a);
-  return p ? p : "0.0.0.0";
+  platform_detail::refresh3DSNetworkStatus(true);
+  const auto &status = networkStatus();
+  return status.ipv4Ready ? status.ip : "0.0.0.0";
 }
 } // namespace platform
 int runApp();
-int main() { return runApp(); }
+int main(int argc, char **argv) {
+  platform::setLaunchPath(argc > 0 ? argv[0] : nullptr);
+  return runApp();
+}

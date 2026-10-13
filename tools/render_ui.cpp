@@ -1,6 +1,7 @@
 // Render the real native graphics implementation on a host for visual checks.
 #include "graphics.hpp"
 #include "platform.hpp"
+#include "version.hpp"
 #include <fstream>
 #include <string>
 namespace platform {
@@ -20,6 +21,12 @@ int main(int argc, char **argv) {
   if (argc != 2)
     return 1;
   std::string prefix = argv[1];
+  chestlink::NetworkStatus online;
+  online.visible = online.connected = online.ipv4Ready = true;
+  online.ssid = "TestNetwork";
+  online.ip = "10.0.0.25";
+  online.internet = chestlink::InternetAccess::reachable;
+  gui::setNetworkStatus(online);
   gui::BoxScreen s;
   s.bank = "SoulSilver";
   s.name = "Box 1";
@@ -54,4 +61,27 @@ int main(int argc, char **argv) {
   save(prefix + "-dialog-bottom.ppm", gui::bottomPixels(), 320);
   gui::numbers("IP exibido no PC", {192, 168, 1, 100}, 2, true);
   save(prefix + "-numbers-bottom.ppm", gui::bottomPixels(), 320);
+  const std::string heading = "Chest Link " + chestlink::appVersionText(chestlink::APP_VERSION_CODE);
+#ifdef CL_NDS
+  const std::vector<std::string> options{"Configurar Wi-Fi", "Atualizar pelo PC", "Consultar bancos", "Creditos", "Sair"};
+#else
+  const std::vector<std::string> options{"Atualizar pelo PC", "Consultar bancos", "Creditos", "Sair"};
+#endif
+  gui::menu(heading, options, 0, "IP 10.0.0.25 PIN 123456");
+  save(prefix + "-wifi-online.ppm", gui::topPixels(), gui::TOP_WIDTH);
+  online.ipv4Ready = false; online.ip.clear();
+  online.internet = chestlink::InternetAccess::unknown;
+  gui::setNetworkStatus(online);
+  gui::menu(heading, options, 0, "Aguardando IP da rede atual");
+  save(prefix + "-wifi-dhcp.ppm", gui::topPixels(), gui::TOP_WIDTH);
+  online.connected = false; online.ssid.clear();
+  gui::setNetworkStatus(online);
+  gui::menu(heading, options, 0,
+#ifdef CL_NDS
+            "Wi-Fi desconectado; Configurar Wi-Fi"
+#else
+            "Wi-Fi desconectado; veja definicoes do 3DS"
+#endif
+  );
+  save(prefix + "-wifi-offline.ppm", gui::topPixels(), gui::TOP_WIDTH);
 }

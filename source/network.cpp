@@ -17,7 +17,7 @@ namespace {
 void nonblock(int fd) {
   int yes = 1;
   if (ioctl(fd, FIONBIO, &yes) < 0)
-    throw Error("Nao foi possivel configurar socket.");
+    throw Error("Rede: modo nao bloqueante (erro " + std::to_string(errno) + ").");
 }
 void ready(int fd, bool writing, uint64_t since, unsigned timeout = 180000) {
   for (;;) {
@@ -88,7 +88,7 @@ void Connection::exact(void *data, size_t n, bool writing) {
 int Connection::listen(unsigned port) {
   int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (fd < 0)
-    throw Error("Nao foi possivel abrir servidor.");
+    throw Error("Recepcao: socket (erro " + std::to_string(errno) + ").");
   try {
     nonblock(fd);
     int one = 1;
@@ -100,9 +100,12 @@ int Connection::listen(unsigned port) {
     a.sin_family = AF_INET;
     a.sin_port = htons(port);
     a.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)) ||
-        ::listen(fd, 1))
-      throw Error("Nao foi possivel usar a porta 40991.");
+    if (bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)))
+      throw Error("Recepcao: bind " + std::to_string(port) + " (erro " +
+                  std::to_string(errno) + ").");
+    if (::listen(fd, 1))
+      throw Error("Recepcao: listen " + std::to_string(port) + " (erro " +
+                  std::to_string(errno) + ").");
     return fd;
   } catch (...) {
     close(fd);

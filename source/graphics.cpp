@@ -9,6 +9,8 @@
 namespace gui {
 namespace {
 uint16_t topData[TOP_WIDTH * HEIGHT], bottomData[BOTTOM_WIDTH * HEIGHT];
+chestlink::NetworkStatus networkState;
+bool screenReady = false, boxScreen = false;
 constexpr uint16_t color(unsigned r, unsigned g, unsigned b) {
   return 0x8000 | (r >> 3) | (g >> 3) << 5 | (b >> 3) << 10;
 }
@@ -125,10 +127,50 @@ struct Canvas {
 Canvas top() { return {topData, TOP_WIDTH}; }
 Canvas bottom() { return {bottomData, BOTTOM_WIDTH}; }
 void background() {
+  screenReady = true;
+  boxScreen = false;
   top().image(assets::top, 0, 0, TOP_WIDTH, 240);
   bottom().image(assets::bottom, 0, 0);
 }
-void show() { platform::present(topData, TOP_WIDTH, bottomData); }
+void networkStrip() {
+  if (!networkState.visible) return;
+  auto c = top();
+  const int width = boxScreen ? TOP_WIDTH - 143 : TOP_WIDTH;
+  c.rect(0, 0, width, boxScreen ? 20 : 29, color(231, 244, 224));
+  const uint16_t ink = networkState.connected ? color(28, 129, 73) :
+      networkState.connecting ? color(175, 111, 22) : color(173, 45, 45);
+  // Compact Wi-Fi arcs, with a slash when the radio is disconnected.
+  c.rect(12, 16, 3, 3, ink);
+  for (int i = 0; i < 5; ++i) {
+    c.pixel(7 + i, 12 - i / 2, ink); c.pixel(15 + i, 10 + i / 2, ink);
+    c.pixel(4 + i, 8 - i / 2, ink); c.pixel(18 + i, 6 + i / 2, ink);
+  }
+  c.rect(9, 6, 9, 2, ink); c.rect(11, 10, 5, 2, ink);
+  if (!networkState.connected && !networkState.connecting)
+    for (int i = 0; i < 17; ++i) c.rect(5 + i, 18 - i, 2, 2, ink);
+  const std::string state = networkState.connected ? "ON " :
+                            networkState.connecting ? "... " : "OFF ";
+  c.text(state + (networkState.ssid.empty() ? "Sem rede" : networkState.ssid),
+         28, 3, ink, (width - 32) / 7);
+  if (boxScreen) return;
+  c.text(networkState.ipv4Ready ? "IP: " + networkState.ip :
+         networkState.connected ?
+#ifdef CL_NDS
+         "IP: aguardando DHCP"
+#else
+         "IP: indisponivel"
+#endif
+         : "IP: --", 6, 16, BLACK, 21);
+  const char *internet = "Internet: --";
+  switch (networkState.internet) {
+  case chestlink::InternetAccess::checking: internet = "Internet: testando"; break;
+  case chestlink::InternetAccess::reachable: internet = "Internet: TCP OK"; break;
+  case chestlink::InternetAccess::unconfirmed: internet = "Internet: nao confirm."; break;
+  default: break;
+  }
+  c.text(internet, TOP_WIDTH / 2 + 3, 16, BLACK, (TOP_WIDTH / 2 - 7) / 7);
+}
+void show() { networkStrip(); platform::present(topData, TOP_WIDTH, bottomData); }
 void button(Canvas c, int x, int y, const std::string &label,
             bool active = false, int width = 108) {
   c.image(assets::button, x, y, width, 28);
@@ -177,6 +219,11 @@ void grid(Canvas c, const BoxScreen &s, int x, int y, bool preview) {
 } // namespace
 const uint16_t *topPixels() { return topData; }
 const uint16_t *bottomPixels() { return bottomData; }
+void setNetworkStatus(const chestlink::NetworkStatus &state) {
+  if (state == networkState) return;
+  networkState = state;
+  if (screenReady) show();
+}
 void notice(const std::string &heading, const std::string &body,
             const std::string &footer, int percent) {
   background();
@@ -204,8 +251,10 @@ void menu(const std::string &heading, const std::vector<std::string> &items,
   top().centered(status.empty() ? "Bancos e transferencias por Wi-Fi" : status,
                  5, 147, TOP_WIDTH - 10, BLACK, (TOP_WIDTH - 10) / 7);
   top().centered(status.empty() ? "A: abrir    B: voltar"
-                                : "A: abrir    B: sair    Recepcao automatica",
+                                : "A: abrir    B: sair",
                  10, 183, TOP_WIDTH - 20);
+  if (!status.empty())
+    top().centered("Receber: exige confirmacao", 10, 202, TOP_WIDTH - 20);
   unsigned first = cursor / 8 * 8;
   for (unsigned i = first; i < std::min<unsigned>(first + 8, items.size()); ++i)
     button(bottom(), 8, 8 + (i - first) * 24, items[i], i == cursor, 304);
@@ -243,6 +292,7 @@ void numbers(const std::string &heading, const std::vector<unsigned> &values,
 }
 void box(const BoxScreen &s) {
   background();
+  boxScreen = true;
   int gx = TOP_WIDTH == 400 ? 45 : 4, info = TOP_WIDTH == 400 ? 264 : 214,
       iw = TOP_WIDTH - info - 6;
   top().text("BANCO LOCAL", 8, 6, BLACK);

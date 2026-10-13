@@ -5,6 +5,7 @@
 #include "platform.hpp"
 #include "pokemon.hpp"
 #include "update.hpp"
+#include "listener_schedule.hpp"
 #include "version.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -13,8 +14,10 @@ using namespace chestlink;
 namespace {
 enum class TransferAction { cancel, pc, direct };
 struct DirectListener {
+  bool enabled = false;
   int server = -1;
   uint32_t pin = 0;
+  ListenerSchedule schedule;
   std::string ip;
   std::string status = "Escolha Configurar Wi-Fi";
 };
@@ -24,10 +27,11 @@ bool handlingIncoming = false;
 void serviceIncoming();
 
 void title(const char *s) { gui::notice(s, "Aguarde...", "B: cancelar", 0); }
-unsigned waitKey() {
+unsigned waitKey(const std::function<void()> &idle = {}) {
   while (platform::alive()) {
     platform::frame();
     serviceIncoming();
+    if (idle) idle();
     unsigned k = platform::keys();
     if (k)
       return k;
@@ -66,7 +70,13 @@ int choose(const char *heading, const std::vector<std::string> &items,
   for (;;) {
     gui::menu(heading, items, cursor,
               mainMenu ? directListener.status : std::string());
-    unsigned k = waitKey();
+    std::string paintedStatus = directListener.status;
+    unsigned k = waitKey([&]() {
+      if (mainMenu && paintedStatus != directListener.status) {
+        gui::menu(heading, items, cursor, directListener.status);
+        paintedStatus = directListener.status;
+      }
+    });
     if (k & platform::TOUCH) {
       auto t = platform::touch();
       int hit = gui::menuHit(t.x, t.y, cursor, items.size());
@@ -494,7 +504,7 @@ void updateApplication() {
     ip = inputIP(settings, true);
     pin = inputPIN(&settings);
   }
-  installPath = "sdmc:/3ds/ChestLink_3DS/ChestLink_3DS.3dsx";
+  installPath = platform::runningApplicationPath();
 #else
   auto stores = platform::stores();
   if (stores.empty())
@@ -504,19 +514,19 @@ void updateApplication() {
     std::vector<std::string> options;
     for (const auto &store : stores)
       options.push_back(store.label);
-    int choice = choose("Salvar atualizacao em", options);
+    int choice = choose("Configuracoes do servidor", options);
     if (choice < 0)
       return;
     selected = static_cast<unsigned>(choice);
   }
   Store settings = stores[selected];
-  std::string device = "/";
-  auto mount = settings.root.find(":/");
-  if (mount != std::string::npos)
-    device = settings.root.substr(0, mount + 2);
-  // NDS launchers do not consistently expose the path of the running .nds.
-  // The accepted version determines a new filename, so the running copy stays
-  // untouched and can be relaunched if the downloaded file has a problem.
+  std::string device = platform::runningApplicationDirectory();
+  if (device.empty()) {
+    device = "/";
+    auto mount = settings.root.find(":/");
+    if (mount != std::string::npos)
+      device = settings.root.substr(0, mount + 2);
+  }
   if (!savedPCConnection(settings, ip, pin)) {
 #ifdef CL_NDS
     if (platform::usingChestLinkHotspot())
@@ -548,7 +558,10 @@ void updateApplication() {
 #endif
   ](uint32_t remote, uint32_t bytes, uint32_t local) {
 #ifndef CL_3DS
-    installPath = device + "ChestLink_DS_v" + appVersionText(remote) + ".nds";
+    installPath = device;
+    if (!installPath.empty() && installPath.back() != '/')
+      installPath += '/';
+    installPath += "ChestLink_DS_v" + appVersionText(remote) + ".nds";
 #endif
     std::string details = "Versao instalada: " + appVersionText(local) +
                          "\nNova versao: " + appVersionText(remote) +
@@ -572,17 +585,63 @@ void updateApplication() {
     message("Atualizacao " + appVersionText(update.version) +
             " instalada e conferida.\n\nSaia do Homebrew Launcher e abra "
             "o Chest Link novamente.\nA versao anterior foi preservada ao "
-            "lado do app.");
+            "lado do app e sera removida depois que a nova versao iniciar.");
 #else
     message("Atualizacao " + appVersionText(update.version) +
             " instalada e conferida.\n\nNova copia: " + installPath +
-            "\nAbra esse arquivo pelo menu da flashcard/SD.\nO app atual e a "
-            "copia anterior permanecem preservados.");
+            "\nAbra esse arquivo pelo menu da flashcard/SD. Ao iniciar a nova "
+            "versao, as copias antigas do Chest Link serao removidas.");
 #endif
   }
 }
 
 void serviceIncoming() {
+  // Startup/cleanup dialogs pump this function before the receiver is enabled.
+  if (!directListener.enabled)
+    return;
+#if defined(CL_NDS) || defined(CL_3DS)
+  // The receiver endpoint follows the live Wi-Fi/IP, not a startup snapshot.
+  if (!handlingIncoming) {
+    auto &listenerSchedule = directListener.schedule;
+    const auto &status = platform::networkStatus();
+    const bool changed = listenerSchedule.link(status);
+    if (changed || !listenerSchedule.ready()) {
+      Connection::close(directListener.server);
+      directListener.server = -1;
+      directListener.ip.clear();
+    }
+    if (!listenerSchedule.ready()) {
+      directListener.status = status.connected ? "Aguardando IP da rede atual" :
+#ifdef CL_3DS
+                                                "Wi-Fi desconectado; veja definicoes do 3DS";
+#else
+                                                "Wi-Fi desconectado; Configurar Wi-Fi";
+#endif
+    } else {
+      const uint64_t now = platform::milliseconds();
+      if (directListener.server < 0 &&
+          listenerSchedule.due(now)) {
+        listenerSchedule.attempted(now);
+        try {
+          platform::network();
+          directListener.server = Connection::listen();
+          if (!directListener.pin) directListener.pin = platform::makePin();
+        } catch (const std::exception &e) {
+          Connection::close(directListener.server);
+          directListener.server = -1;
+          directListener.ip.clear();
+          directListener.status = e.what();
+        }
+      }
+      if (directListener.server >= 0) {
+        directListener.ip = status.ip;
+        char pinText[8];
+        std::snprintf(pinText, sizeof(pinText), "%06u", unsigned(directListener.pin));
+        directListener.status = "IP " + status.ip + " PIN " + pinText;
+      }
+    }
+  }
+#endif
   if (handlingIncoming || directListener.server < 0)
     return;
   auto conn = Connection::tryAccept(directListener.server);
@@ -598,39 +657,69 @@ void serviceIncoming() {
 }
 
 void startListener() {
+  directListener.enabled = true;
+  // Never overwrite an owned socket with a second bind to the same port.
+  if (directListener.server >= 0)
+    return;
   try {
     platform::network();
+#if defined(CL_NDS) || defined(CL_3DS)
+    directListener.schedule.link(platform::networkStatus());
+    directListener.schedule.attempted(platform::milliseconds());
+#endif
     directListener.server = Connection::listen();
-    directListener.pin = platform::makePin();
+    if (!directListener.pin)
+      directListener.pin = platform::makePin();
     directListener.ip = platform::ip();
+#if defined(CL_NDS) || defined(CL_3DS)
+    // ip() refreshes the native snapshot; seed the retry state from it so the
+    // first menu frame does not close the socket we have just opened.
+    directListener.schedule.link(platform::networkStatus());
+    directListener.schedule.attempted(platform::milliseconds());
+#endif
     char pinText[8];
     std::snprintf(pinText, sizeof(pinText), "%06u", unsigned(directListener.pin));
     directListener.status = "IP " + directListener.ip + " PIN " + pinText;
   } catch (const std::exception &e) {
+    Connection::close(directListener.server);
     directListener.server = -1;
+    directListener.ip.clear();
 #ifdef CL_NDS
-    directListener.status =
+    directListener.status = platform::networkStatus().ipv4Ready ? e.what() :
         std::string(e.what()).find("Rede salva") != std::string::npos
             ? "Rede salva indisponivel; Configurar Wi-Fi"
             : "Wi-Fi nao conectado; Configurar Wi-Fi";
 #else
-    directListener.status = "Recepcao direta indisponivel";
+    directListener.status = e.what();
 #endif
   }
 }
-#ifdef CL_NDS
 void stopListener() {
+  directListener.enabled = false;
   Connection::close(directListener.server);
   directListener.server = -1;
   directListener.pin = 0;
+  directListener.schedule = {};
   directListener.ip.clear();
   directListener.status = "Escolha Configurar Wi-Fi";
 }
-#endif
 } // namespace
 int runApp() {
   try {
     platform::init();
+#if defined(CL_NDS) || defined(CL_3DS)
+    bool cleanupComplete = true;
+    const unsigned oldApps =
+        platform::removePreviousApplicationVersions(APP_VERSION_CODE,
+                                                    cleanupComplete);
+    if (oldApps || !cleanupComplete) {
+      std::string status = "Versoes anteriores removidas: " +
+                           std::to_string(oldApps) + ".";
+      if (!cleanupComplete)
+        status += " Algumas pastas nao puderam ser limpas.";
+      message(status);
+    }
+#endif
     for (const auto &store : platform::stores())
       recover(store);
     startListener();
@@ -660,7 +749,8 @@ int runApp() {
           consult();
         else
           message(
-              "Chest Link: app independente.\nVisual PKSM / "
+              "Versao " + appVersionText(APP_VERSION_CODE) +
+              "\nChest Link: app independente.\nVisual PKSM / "
               "FlagBrew.\nBernardo Giordano, Admiral Fish,\npiepie62 e "
               "colaboradores.\nLeitura PKX: PKSM-Core.\nSprites: PokeAPI; "
               "Pokemon pertence\na Nintendo, Creatures, GAME FREAK.\nGPL-3.0+: "
@@ -686,7 +776,8 @@ int runApp() {
           consult();
         else
           message(
-              "Chest Link: app independente.\nVisual PKSM / "
+              "Versao " + appVersionText(APP_VERSION_CODE) +
+              "\nChest Link: app independente.\nVisual PKSM / "
               "FlagBrew.\nBernardo Giordano, Admiral Fish,\npiepie62 e "
               "colaboradores.\nLeitura PKX: PKSM-Core.\nSprites: PokeAPI; "
               "Pokemon pertence\na Nintendo, Creatures, GAME FREAK. GPL-3.0+: "
@@ -706,13 +797,11 @@ int runApp() {
         message(e.what());
       }
     }
-    Connection::close(directListener.server);
-    directListener.server = -1;
+    stopListener();
     platform::shutdown();
     return 0;
   } catch (const std::exception &e) {
-    Connection::close(directListener.server);
-    directListener.server = -1;
+    stopListener();
     message(e.what());
     platform::shutdown();
     return 1;

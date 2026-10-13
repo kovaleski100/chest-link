@@ -98,7 +98,7 @@ O botão **Limpar pendências** da interface tira, após confirmação, os itens
 
 ### Atualização de apps — comandos 4 e 5
 
-Após o cabeçalho autenticado, o servidor informa se há uma versão mais nova do app correspondente: comando `4` para o `.3dsx` do 3DS e comando `5` para o `.nds` do DS. Cada imagem tem seu próprio `release.json` (versão, tamanho e SHA-256). O cliente confirma antes de baixar e verifica o hash antes de concluir. O 3DS substitui o caminho fixo do app, mantendo `.previous`; o DS grava uma cópia `.nds` separada no armazenamento escolhido, pois não há um caminho de inicialização confiável para substituir. A conexão de atualização não consulta nem altera itens da caixa postal.
+Após o cabeçalho autenticado, o servidor informa se há uma versão mais nova do app correspondente: comando `4` para o `.3dsx` do 3DS e comando `5` para o `.nds` do DS. Cada imagem tem seu próprio `release.json` (versão, tamanho e SHA-256). O cliente confirma antes de baixar e verifica o hash antes de concluir. O 3DS substitui o caminho fixo do app, mantendo `.previous`. No DS, o app usa o caminho informado pelo launcher compatível e grava a nova versão na mesma pasta; no primeiro início da atualização, procura em `fat:/` e `sd:/` e remove somente arquivos Chest Link antigos/duplicados com o padrão de nome do app, preservando a cópia em execução e versões mais novas. Se o launcher não informar o caminho, o fallback é a pasta padrão do armazenamento. A conexão de atualização não consulta nem altera itens da caixa postal.
 
 ### Persistência no PC
 

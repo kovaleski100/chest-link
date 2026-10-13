@@ -16,7 +16,7 @@ Os formatos de bancos e IDs foram conferidos no [Pokémon Chest](https://github.
 
 Os executáveis foram compilados com:
 
-- [BlocksDS](https://github.com/blocksds/sdk), [libnds](https://github.com/blocksds/libnds), [DSWiFi](https://github.com/blocksds/dswifi) e [Wonderful Toolchain](https://wonderful.asie.pl/). Créditos incluem Antonio Niño Díaz, asie, Stephen Stair, Dave Murphy e os contribuidores das bibliotecas.
+- [BlocksDS](https://github.com/blocksds/sdk), [libnds](https://github.com/blocksds/libnds), [DSWiFi](https://github.com/blocksds/dswifi) e [Wonderful Toolchain](https://wonderful.asie.pl/). Créditos incluem Antonio Niño Díaz, asie, Stephen Stair, Dave Murphy e os contribuidores das bibliotecas. Para permitir alterações no driver ARM7 DS, a fonte DSWiFi está incluída em `third_party/dswifi`, fixada na revisão `59d2636dd851ea26a4ea49f329321d3bfb002066`; a atribuição e as licenças seguem junto às fontes.
 - [devkitARM/devkitPro](https://devkitpro.org/) e [libctru](https://github.com/devkitPro/libctru), por seus respectivos mantenedores e contribuidores.
 - Os runtimes C/C++ dos SDKs, incluindo GCC, libstdc++, Picolibc/newlib, e componentes de rede como lwIP.
 

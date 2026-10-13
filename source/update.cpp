@@ -10,6 +10,28 @@ namespace {
 using namespace wireio;
 constexpr uint32_t MAX_UPDATE_BYTES = 16 * 1024 * 1024;
 
+std::string fileDigest(const std::string &path) {
+  FILE *file = std::fopen(path.c_str(), "rb");
+  if (!file) throw Error("Nao foi possivel conferir a copia anterior do app.");
+  Sha256 hash;
+  uint8_t block[4096];
+  size_t total = 0, bytes;
+  while ((bytes = std::fread(block, 1, sizeof(block), file))) {
+    total += bytes;
+    if (total > MAX_UPDATE_BYTES) {
+      std::fclose(file);
+      throw Error("Copia anterior do app excede o limite de tamanho.");
+    }
+    hash.update(block, bytes);
+  }
+  const bool failed = std::ferror(file);
+  const int closed = std::fclose(file);
+  if (failed || closed) throw Error("Falha ao conferir a copia anterior do app.");
+  return hex(hash.finish());
+}
+
+std::string receiptPath(const std::string &backup) { return backup + ".cleanup.json"; }
+
 void updateHello(Wire &wire, uint32_t pin, uint32_t command) {
   if (pin > 999999)
     throw Error("PIN invalido.");
@@ -26,7 +48,7 @@ std::string previousPath(const std::string &installPath) {
   for (unsigned i = 0; i < 100; ++i) {
     std::string suffix = i ? ".previous" + std::to_string(i) : ".previous";
     std::string candidate = installPath + suffix;
-    if (!exists(candidate))
+    if (!exists(candidate) && !exists(receiptPath(candidate)))
       return candidate;
   }
   throw Error("Muitos backups antigos; remova um arquivo .previous no SD.");
@@ -107,6 +129,19 @@ UpdateResult updateBinary(
 
     if (exists(installPath)) {
       backup = previousPath(installPath);
+      if (requireExisting) {
+        // Written before renaming: interrupted updates retain their original.
+        // A receipt cannot authorize deletion until the new image is launched.
+        Json receipt;
+        receipt.object["format"] = Json::integer(1);
+        receipt.object["version"] = Json::integer(version);
+        receipt.object["installed"] = Json::text(hex(expected));
+        receipt.object["backup"] = Json::text(fileDigest(installPath));
+        const std::string path = receiptPath(backup);
+        writeText(path + ".download", receipt.dump());
+        if (std::rename((path + ".download").c_str(), path.c_str()))
+          throw Error("Nao foi possivel registrar a copia anterior do app.");
+      }
       if (std::rename(installPath.c_str(), backup.c_str()))
         throw Error("Nao foi possivel preservar o app atual no armazenamento.");
       installedBackup = true;
@@ -127,6 +162,44 @@ UpdateResult updateBinary(
     throw;
   }
   return {UpdateState::installed, version, bytes};
+}
+
+unsigned removePrevious3DSUpdates(const std::string &runningPath,
+                                 uint32_t currentVersion, bool &complete) {
+  complete = true;
+  if (runningPath.empty() || !exists(runningPath)) return 0;
+  unsigned removed = 0;
+  std::string installedHash;
+  for (unsigned i = 0; i < 100; ++i) {
+    const std::string backup = runningPath +
+        (i ? ".previous" + std::to_string(i) : ".previous");
+    const std::string path = receiptPath(backup);
+    if (!exists(path)) continue;
+    try {
+      const Json receipt = Json::parse(readText(path, 2048));
+      auto field = [&](const char *key, Json::Kind kind) -> const Json & {
+        const auto found = receipt.object.find(key);
+        if (found == receipt.object.end() || found->second.kind != kind)
+          throw Error("Recibo de atualizacao invalido.");
+        return found->second;
+      };
+      if (receipt.kind != Json::OBJECT || receipt.object.size() != 4 ||
+          field("format", Json::NUMBER).number != 1)
+        throw Error("Recibo de atualizacao invalido.");
+      if (field("version", Json::NUMBER).number != currentVersion) continue;
+      if (installedHash.empty()) installedHash = fileDigest(runningPath);
+      if (field("installed", Json::STRING).string != installedHash) continue;
+      if (exists(backup)) {
+        if (field("backup", Json::STRING).string != fileDigest(backup)) {
+          complete = false; continue;
+        }
+        if (std::remove(backup.c_str())) { complete = false; continue; }
+        ++removed;
+      }
+      if (std::remove(path.c_str())) complete = false;
+    } catch (const Error &) { complete = false; }
+  }
+  return removed;
 }
 
 UpdateResult update3DS(

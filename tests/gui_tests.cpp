@@ -142,10 +142,25 @@ int main(int argc, char **argv) {
     gui::menu("Bancos", {"1", "2"}, 1);
     gui::notice("SHA-256", "Cópia verificada", "A/B: voltar", 100);
     gui::numbers("PIN", {9, 9, 9, 9, 9, 9}, 5, false);
+    std::vector<uint16_t> controls(gui::bottomPixels(), gui::bottomPixels() + 320 * 240);
+    chestlink::NetworkStatus live;
+    live.visible = live.connected = live.ipv4Ready = true;
+    live.ssid = "TestNetwork"; live.ip = "192.0.2.25";
+    live.internet = chestlink::InternetAccess::reachable;
+    gui::setNetworkStatus(live);
+    require(std::equal(controls.begin(), controls.end(), gui::bottomPixels()),
+            "network refresh changed controls without input");
+    const std::vector<uint16_t> online(gui::topPixels(), gui::topPixels() + gui::TOP_WIDTH * 29);
+    live.connected = live.ipv4Ready = false; live.ssid.clear(); live.ip.clear();
+    live.internet = chestlink::InternetAccess::unknown;
+    gui::setNetworkStatus(live);
+    require(!std::equal(online.begin(), online.end(), gui::topPixels()),
+            "Wi-Fi loss did not repaint the top status strip");
+    std::cout << "PASS live Wi-Fi status redraw preserves current controls\n";
     require(gui::assets::spriteCount >= 900, "missing icon catalogue");
     std::cout << "PASS native renderer handles bounds, UTF-8, unknown sprites "
                  "and numeric fields\n";
-    std::cout << "ALL 4 GUI TEST GROUPS PASSED\n";
+    std::cout << "ALL 5 GUI TEST GROUPS PASSED\n";
   } catch (const std::exception &e) {
     std::cerr << "FAIL " << e.what() << '\n';
     return 1;

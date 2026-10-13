@@ -1,0 +1,160 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# SPDX-FileContributor: Antonio Niño Díaz, 2023
+
+BLOCKSDS	?= /opt/blocksds/core
+BLOCKSDSEXT	?= /opt/blocksds/external
+
+WONDERFUL_TOOLCHAIN	?= /opt/wonderful
+ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
+
+# Source code paths
+# -----------------
+
+SOURCEDIRS	:= source/arm9 source/common
+INCLUDEDIRS	:= include source
+
+# Defines passed to all files
+# ---------------------------
+
+ifeq ($(DEBUG),1)
+DEFINES		+= -DDSWIFI_LOGS
+endif
+
+# lwIP requirements
+# -----------------
+
+ifeq ($(ENABLE_LWIP),1)
+DEFINES		+= -DDSWIFI_ENABLE_LWIP
+SOURCEDIRS	+= lwip/source
+INCLUDEDIRS	+= lwip/include source/arm9/lwip/include
+endif
+
+# Libraries
+# ---------
+
+LIBDIRS		:= $(BLOCKSDS)/libs/libnds
+
+# Build artifacts
+# ---------------
+
+ifeq ($(ENABLE_LWIP),1)
+    ifeq ($(DEBUG),1)
+        NAME		:= libdswifi9d
+        BUILDDIR	:= build/debug/arm9
+    else
+        NAME		:= libdswifi9
+        BUILDDIR	:= build/release/arm9
+    endif
+else
+    ifeq ($(DEBUG),1)
+        NAME		:= libdswifi9d_noip
+        BUILDDIR	:= build/debug_noip/arm9
+    else
+        NAME		:= libdswifi9_noip
+        BUILDDIR	:= build/release_noip/arm9
+    endif
+endif
+
+ARCHIVE		:= lib/$(NAME).a
+
+# Tools
+# -----
+
+PREFIX		:= $(ARM_NONE_EABI_PATH)arm-none-eabi-
+CC		:= $(PREFIX)gcc
+CXX		:= $(PREFIX)g++
+AR		:= $(PREFIX)ar
+MKDIR		:= mkdir
+RM		:= rm -rf
+
+# Verbose flag
+# ------------
+
+ifeq ($(VERBOSE),1)
+V		:=
+else
+V		:= @
+endif
+
+# Source files
+# ------------
+
+SOURCES_S	:= $(shell find -L $(SOURCEDIRS) -name "*.s")
+SOURCES_C	:= $(shell find -L $(SOURCEDIRS) -name "*.c")
+SOURCES_CPP	:= $(shell find -L $(SOURCEDIRS) -name "*.cpp")
+
+# Compiler and linker flags
+# -------------------------
+
+DEFINES		+= -D__NDS__ -DARM9
+
+ARCH		:= -mcpu=arm946e-s+nofp
+
+WARNFLAGS	:= -Wall -Wextra -Wstrict-prototypes -Wshadow
+
+INCLUDEFLAGS	:= $(foreach path,$(INCLUDEDIRS),-I$(path)) \
+		   $(foreach path,$(LIBDIRS),-I$(path)/include)
+
+ASFLAGS		+= -g -x assembler-with-cpp $(DEFINES) $(ARCH) \
+		   -mthumb $(INCLUDEFLAGS) \
+		   -ffunction-sections -fdata-sections
+
+CFLAGS		+= -g -std=gnu23 $(WARNFLAGS) $(DEFINES) $(ARCH) \
+		   -mthumb $(INCLUDEFLAGS) -Os \
+		   -ffunction-sections -fdata-sections \
+		   -fomit-frame-pointer
+
+CXXFLAGS	+= -g -std=gnu++23 $(WARNFLAGS) $(DEFINES) $(ARCH) \
+		   -mthumb $(INCLUDEFLAGS) -Os \
+		   -ffunction-sections -fdata-sections \
+		   -fno-exceptions -fno-rtti \
+		   -fomit-frame-pointer
+
+# Intermediate build files
+# ------------------------
+
+OBJS		:= $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_S))) \
+		   $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_C))) \
+		   $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_CPP)))
+
+DEPS		:= $(OBJS:.o=.d)
+
+# Targets
+# -------
+
+.PHONY: all clean
+
+all: $(ARCHIVE)
+
+$(ARCHIVE): $(OBJS)
+	@echo "  AR.9    $@"
+	@$(MKDIR) -p $(@D)
+	$(V)$(AR) rcs $@ $(OBJS)
+
+clean:
+	@echo "  CLEAN.9"
+	$(V)$(RM) $(ARCHIVE) $(BUILDDIR)
+
+# Rules
+# -----
+
+$(BUILDDIR)/%.s.o : %.s
+	@echo "  AS.9    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(ASFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR)/%.c.o : %.c
+	@echo "  CC.9    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR)/%.cpp.o : %.cpp
+	@echo "  CXX.9   $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+# Include dependency files if they exist
+# --------------------------------------
+
+-include $(DEPS)

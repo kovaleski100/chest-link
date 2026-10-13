@@ -1,5 +1,6 @@
 #pragma once
 #include "pokemon.hpp"
+#include "network_status.hpp"
 namespace gui {
 constexpr unsigned HEIGHT = 240, BOTTOM_WIDTH = 320;
 #ifdef CL_NDS
@@ -14,6 +15,8 @@ void notice(const std::string &heading, const std::string &body,
 void menu(const std::string &heading, const std::vector<std::string> &,
           unsigned cursor, const std::string &status = {});
 int menuHit(int x, int y, unsigned cursor, unsigned count);
+// Updates the top status strip without repainting the current controls.
+void setNetworkStatus(const chestlink::NetworkStatus &);
 void numbers(const std::string &heading, const std::vector<unsigned> &,
              unsigned cursor, bool ip);
 struct BoxScreen {

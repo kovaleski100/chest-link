@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# SPDX-FileContributor: Antonio Niño Díaz, 2023
+
+BLOCKSDS	?= /opt/blocksds/core
+BLOCKSDSEXT	?= /opt/blocksds/external
+
+WONDERFUL_TOOLCHAIN	?= /opt/wonderful
+ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
+
+# Source code paths
+# -----------------
+
+SOURCEDIRS	:= source/arm7 source/common mbedtls/library
+INCLUDEDIRS	:= include source mbedtls/include source/arm7/twl/crypto
+
+# Defines passed to all files
+# ---------------------------
+
+DEFINES		:=
+
+ifeq ($(DEBUG),1)
+DEFINES		+= -DDSWIFI_LOGS
+endif
+
+# Libraries
+# ---------
+
+LIBDIRS		:= $(BLOCKSDS)/libs/libnds
+
+# Build artifacts
+# ---------------
+
+ifeq ($(DEBUG),1)
+NAME		:= libdswifi7d
+BUILDDIR	:= build/debug/arm7
+else
+NAME		:= libdswifi7
+BUILDDIR	:= build/release/arm7
+endif
+
+ARCHIVE		:= lib/$(NAME).a
+
+# Tools
+# -----
+
+PREFIX		:= $(ARM_NONE_EABI_PATH)arm-none-eabi-
+CC		:= $(PREFIX)gcc
+CXX		:= $(PREFIX)g++
+AR		:= $(PREFIX)ar
+MKDIR		:= mkdir
+RM		:= rm -rf
+
+# Verbose flag
+# ------------
+
+ifeq ($(VERBOSE),1)
+V		:=
+else
+V		:= @
+endif
+
+# Source files
+# ------------
+
+SOURCES_S	:= $(shell find -L $(SOURCEDIRS) -name "*.s")
+SOURCES_C	:= $(shell find -L $(SOURCEDIRS) -name "*.c")
+SOURCES_CPP	:= $(shell find -L $(SOURCEDIRS) -name "*.cpp")
+
+# The NTR WPA2 supplicant also needs the upstream TWL crypto helpers. The
+# BlocksDS linker routes object names containing '.twl.' to DSi-only RAM, so
+# compile these shared routines to explicitly common object names. Preserve
+# the upstream sources and their runtime selection of the DSi SHA-1 BIOS.
+COMMON_MBEDTLS_C := $(wildcard mbedtls/library/*.twl.c)
+COMMON_WPA_C := source/arm7/twl/ieee/wpa.twl.c
+SOURCES_C := $(filter-out $(COMMON_MBEDTLS_C) $(COMMON_WPA_C),$(SOURCES_C))
+
+# Compiler and linker flags
+# -------------------------
+
+DEFINES		+= -D__NDS__ -DARM7
+
+ARCH		:= -mcpu=arm7tdmi
+
+WARNFLAGS	:= -Wall -Wextra -Wstrict-prototypes -Wshadow
+
+INCLUDEFLAGS	:= $(foreach path,$(INCLUDEDIRS),-I$(path)) \
+		   $(foreach path,$(LIBDIRS),-I$(path)/include)
+
+ASFLAGS		+= -g -x assembler-with-cpp $(DEFINES) $(ARCH) \
+		   -mthumb $(INCLUDEFLAGS) \
+		   -ffunction-sections -fdata-sections
+
+CFLAGS		+= -g -std=gnu23 $(WARNFLAGS) $(DEFINES) $(ARCH) \
+		   -mthumb $(INCLUDEFLAGS) -Os \
+		   -ffunction-sections -fdata-sections \
+		   -fomit-frame-pointer
+
+CXXFLAGS	+= -g -std=gnu++23 $(WARNFLAGS) $(DEFINES) $(ARCH) \
+		   -mthumb $(INCLUDEFLAGS) -Os \
+		   -ffunction-sections -fdata-sections \
+		   -fno-exceptions -fno-rtti \
+		   -fomit-frame-pointer
+
+# Intermediate build files
+# ------------------------
+
+OBJS		:= $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_S))) \
+		   $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_C))) \
+		   $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_CPP))) \
+		   $(patsubst mbedtls/library/%.twl.c,$(BUILDDIR)/common_crypto/common_%.o,$(COMMON_MBEDTLS_C)) \
+		   $(BUILDDIR)/common_crypto/common_wpa_crypto.o
+
+DEPS		:= $(OBJS:.o=.d)
+
+# Targets
+# -------
+
+.PHONY: all clean
+
+all: $(ARCHIVE)
+
+$(ARCHIVE): $(OBJS) Makefile.arm7
+	@echo "  AR.7    $@"
+	@$(MKDIR) -p $(@D)
+	$(V)$(RM) $@.tmp
+	$(V)$(AR) rcs $@.tmp $(OBJS)
+	$(V)mv $@.tmp $@
+
+clean:
+	@echo "  CLEAN.7"
+	$(V)$(RM) $(ARCHIVE) $(BUILDDIR)
+
+# Rules
+# -----
+
+$(BUILDDIR)/common_crypto/common_%.o : mbedtls/library/%.twl.c
+	@echo "  CC.7    $< (shared DS/DSi crypto)"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR)/common_crypto/common_wpa_crypto.o : $(COMMON_WPA_C)
+	@echo "  CC.7    $< (shared DS/DSi crypto)"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR)/%.s.o : %.s
+	@echo "  AS.7    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(ASFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR)/%.c.o : %.c
+	@echo "  CC.7    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR)/%.cpp.o : %.cpp
+	@echo "  CXX.7   $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+# Include dependency files if they exist
+# --------------------------------------
+
+-include $(DEPS)

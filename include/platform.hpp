@@ -1,5 +1,6 @@
 #pragma once
 #include "core.hpp"
+#include "network_status.hpp"
 namespace platform {
 enum Key {
   UP = 1,
@@ -29,6 +30,16 @@ struct Touch {
 Touch touch(); // Virtual 320x240 coordinates on the bottom screen.
 void present(const uint16_t *top, unsigned topWidth, const uint16_t *bottom);
 void network();
+#if defined(CL_NDS) || defined(CL_3DS)
+void setLaunchPath(const char *path);
+std::string runningApplicationDirectory();
+unsigned removePreviousApplicationVersions(uint32_t currentVersion,
+                                            bool &complete);
+const chestlink::NetworkStatus &networkStatus();
+#endif
+#ifdef CL_3DS
+std::string runningApplicationPath();
+#endif
 #ifdef CL_NDS
 // Scan nearby networks, connect to the user's selected supported access point,
 // and remember it so later launches reconnect to that same network. Calling

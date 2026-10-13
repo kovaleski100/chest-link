@@ -326,11 +326,12 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn('updateNDS(wire, pin, APP_VERSION_CODE, installPath',app)
         self.assertIn('put32(header + 16, command);',update)
 
-    def test_nds_connect_handles_stale_in_progress_after_tcp_handshake(self):
+    def test_3ds_connect_handles_its_stale_in_progress_without_ds_workaround(self):
         network=(ROOT/"source/network.cpp").read_text()
-        self.assertIn('#if defined(CL_3DS) || defined(CL_NDS)',network)
+        self.assertIn('#ifdef CL_3DS',network)
+        self.assertNotIn('#if defined(CL_3DS) || defined(CL_NDS)',network)
         self.assertIn('if (!status && error == -26)',network)
-        self.assertIn('(errno == EISCONN && retry < 0)',network)
+        self.assertIn('(retry < 0 && retryError == EISCONN)',network)
 
     def test_actual_offline_web_assets_and_response_headers(self):
         for path in ["/","/app.js","/style.css","/dex.css","/assets/bg_top.png","/assets/sprites.png",
@@ -350,7 +351,9 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn('id="dex-retry"',html)
         self.assertIn("function showDexError(message)",script)
         self.assertIn("dexGame = 'home', dexPool = 'all'",script)
-        self.assertIn("const capturedSpecies = new Set(capturedForCounter).size",script)
+        # Automatically received Pokemon and manual markings both count,
+        # with each species counted only once.
+        self.assertIn("const capturedSpecies = new Set([...manualCapturedForCounter, ...(dexState.serverCaptured || Object.keys(counts).map(Number))]).size",script)
         self.assertIn("isHome ? Object.values(dexState.individual || {}).flat()",script)
         self.assertIn("button.disabled = isHome",script)
         self.assertIn("$('dex-exclusive').disabled = isHome ||",script)

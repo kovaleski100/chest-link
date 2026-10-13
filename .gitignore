@@ -12,3 +12,4 @@ platform/3ds/build/
 *.zip
 __pycache__/
 server/dados/
+diagnosticos/

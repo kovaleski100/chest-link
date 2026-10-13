@@ -27,8 +27,8 @@ function renderHotspot(info = state.hotspot || {}) {
   button.classList.toggle('danger', Boolean(info.running));
   button.disabled = hotspotBusy || busy || !info.available || !manageable;
   if (!info.available) $('hotspot-state').textContent = info.reason || 'Hotspot indisponível neste computador.';
+  else if (info.running) $('hotspot-state').textContent = `${info.ssid} · PC ${info.ip} · TCP ${info.consolePort ?? state.port ?? 40992} · internet compartilhada · rede local bloqueada · canal ${info.channel}${manageable ? '' : ' · controle disponível apenas neste PC'}`;
   else if (!manageable) $('hotspot-state').textContent = 'Controle disponível apenas no navegador aberto neste PC.';
-  else if (info.running) $('hotspot-state').textContent = `${info.ssid} · PC ${info.ip} · internet compartilhada · rede local bloqueada · canal ${info.channel}`;
   else $('hotspot-state').textContent = info.reason || 'Desligada. Ao iniciar, o DS usará esta rede em vez do roteador.';
 }
 function requestHotspotStart() {
