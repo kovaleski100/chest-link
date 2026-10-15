@@ -1,0 +1,1269 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (C) 2021 Max Thomas
+// Copyright (C) 2025 Antonio Niño Díaz
+
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+
+#include <nds.h>
+
+#include <dswifi_common.h>
+
+#include "arm7/access_point.h"
+#include "arm7/debug.h"
+#include "arm7/ipc.h"
+#include "arm7/twl/ath/wmi.h"
+#include "arm7/twl/ath/mbox.h"
+#include "arm7/twl/ieee/wpa.h"
+#include "arm7/twl/card.h"
+#include "arm7/twl/utils.h"
+#include "common/ieee_defs.h"
+#include "common/random.h"
+
+#define IEEE_CRYPT_TKIP     (0x000FAC02)
+#define IEEE_CRYPT_AES_CCMP (0x000FAC04)
+
+#define IEEE_AUTH_PSK       (0x000FAC02)
+
+static u8 device_num_channels = 0;
+static u8 device_cur_channel_idx = 0;
+static u16 channel_freqs[32];
+
+u16 wmi_idk = 0;
+static bool wmi_bIsReady;
+
+// Set to true between WMI_START_SCAN_CMD and WMI_SCAN_COMPLETE_EVENT
+static bool wmi_is_scanning;
+
+static bool ap_connected;
+static bool ap_connecting;
+
+static bool has_sent_hs2;
+static bool has_sent_hs4;
+
+static u8 device_ap_nonce[32];
+static u8 device_nonce[32];
+static u8 device_ap_mic[16];
+static gtk_keyinfo device_gtk_keyinfo;
+static ptk_keyinfo device_ptk;
+
+static void wmi_set_bss_filter(u8 filter, u32 ieMask);
+static void wmi_add_cipher_key(u8 idx, u8 usage, const u8 *key, const u8 *rsc);
+static void wmi_post_handshake(const u8 *tk, const gtk_keyinfo *gtk_info, const u8 *rsc);
+static void wmi_set_scan_params(u8 flags, u16 maxact_chdwell_time,
+                                u16 pas_chdwell_time, u16 minact_chdwell_time);
+
+// Pkt handlers
+
+static int wmi_ieee_to_crypt(u32 ieee)
+{
+    switch (ieee)
+    {
+        case IEEE_CRYPT_TKIP:
+            return AP_CRYPT_TKIP;
+        case IEEE_CRYPT_AES_CCMP:
+            return AP_CRYPT_AES;
+        default:
+            return AP_CRYPT_NONE;
+    }
+}
+
+void wmi_init(void)
+{
+    wmi_bIsReady = false;
+
+    wmi_is_scanning = false;
+
+    ap_connected = false;
+    ap_connecting = false;
+}
+
+bool wmi_is_ap_connected(void)
+{
+    // WPA2 needs to complete its handshake before doing anything else
+    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+        return ap_connected && wmi_handshake_done();
+
+    return ap_connected;
+}
+
+bool wmi_is_ap_connecting(void)
+{
+    // If the WPA2 handshake isn't complete we are still connecting
+    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    {
+        // If we're connecting to the AP
+        if (ap_connecting)
+            return true;
+
+        // If we're connected to the AP but the handshake isn't finished
+        if (ap_connected && !wmi_handshake_done())
+            return true;
+
+        return false;
+    }
+
+    return ap_connecting;
+}
+
+static void wmi_handle_get_channel_list(u8 *pkt_data, u32 len)
+{
+    (void)len;
+
+    u8 num_entries = pkt_data[1];
+    u16 *channel_entries = (u16*)&pkt_data[2];
+    WLOG_PRINTF("T: GET_CHANNEL_LIST_RESP (%u entries)\n", num_entries);
+    WLOG_FLUSH();
+
+    device_num_channels = num_entries;
+
+    if (num_entries > 32)
+        num_entries = 32;
+
+    memcpy(channel_freqs, channel_entries, num_entries * sizeof(u16));
+
+    // for (int i = 0; i < num_entries; i++)
+    //     WLOG_PRINTF("T: %d: 0x%x\n", i, (unsigned int)channel_entries[i]);
+    // WLOG_FLUSH();
+}
+
+static void wmi_handle_scan_complete(u8* pkt_data, u32 len)
+{
+    (void)pkt_data;
+    (void)len;
+#if 0
+    struct __attribute__((packed))
+    {
+        u32 status;
+    }
+    *wmi_params = (void*)pkt_data;
+
+    WLOG_PRINTF("T: SCAN_COMPLETE_EVENT (%u B) %x\n", len, wmi_params->status);
+    WLOG_FLUSH();
+#endif
+    wmi_is_scanning = false;
+}
+
+static int wifi_mhz_to_channel(unsigned int mhz)
+{
+    if (mhz == 2484)
+        return 14;
+
+    return 1 + ((mhz - 2412) / 5);
+}
+
+static unsigned int wifi_channel_to_mhz(int channel)
+{
+    if (channel == 14)
+        return 2484;
+
+    return 2412 + (channel - 1) * 5;
+}
+
+static void wmi_handle_bss_info(u8 *pkt_data, u32 len_)
+{
+    // WLOG_PRINTF("T: BSSINFO (%u B)\n", len_);
+    // WLOG_FLUSH();
+
+    typedef struct __attribute__((packed)) {
+        u16 channel; // MHz
+        u8 frametype;
+        u8 snr;
+        s16 rssi;
+        u8 bssid[6];
+        u32 ieMask;
+        u8 body[];
+    } wmi_bss_info_hdr;
+
+    typedef struct __attribute__((packed)) {
+        u64 timestamp;
+        u16 beaconinterval;
+        u16 capability;
+        u8 elements[];
+    } wmi_bss_info_frame_hdr;
+
+    if (len_ <= (sizeof(wmi_bss_info_hdr) + sizeof(wmi_bss_info_frame_hdr)))
+        return;
+
+    wmi_bss_info_hdr *wmi_params = (void *)pkt_data;
+    wmi_bss_info_frame_hdr *wmi_frame_hdr = (void *)wmi_params->body;
+
+    // If the signal-to-noise ratio is too low ignore the message
+    if (wmi_params->snr < 0x10) // Maybe this is too low, should it be 0x18 or 0x20?
+        return;
+
+    s32 data_left = len_ - sizeof(wmi_bss_info_hdr) - sizeof(wmi_bss_info_frame_hdr);
+    u8 *read_ptr = wmi_frame_hdr->elements;
+
+    char ap_ssid[32 + 1] = { 0 };
+    size_t ap_ssid_len = 0;
+
+    Wifi_ApSecurityType sec_type = AP_SECURITY_OPEN;
+    Wifi_ApCryptType group_crypto = AP_CRYPT_NONE;
+    Wifi_ApCryptType pair_crypto = AP_CRYPT_NONE;
+    Wifi_ApAuthType auth_type = AP_AUTH_NONE;
+
+    if (wmi_frame_hdr->capability & CAPS_PRIVACY)
+        sec_type = AP_SECURITY_WEP;
+
+    while (data_left > 0)
+    {
+        u8 id = read_ptr[0];
+        u8 len = read_ptr[1];
+
+        read_ptr += 2;
+        data_left -= 2;
+
+        if (id == MGT_FIE_ID_SSID) // SSID
+        {
+            if (read_ptr[0] > 0)
+            {
+                ap_ssid_len = len > 32 ? 32 : len;
+                memcpy(ap_ssid, &read_ptr[0], ap_ssid_len);
+            }
+        }
+        else if (id == MGT_FIE_ID_VENDOR) // RSN - Microsoft/Vendor
+        {
+            // TODO: Handle RSN here as well
+            //sec_type = AP_SECURITY_WPA2;
+        }
+        else if (id == MGT_FIE_ID_RSN) // RSN
+        {
+            sec_type = AP_SECURITY_WPA2;
+
+            u16 version = getle16(read_ptr);
+
+            if (version != 0x0001)
+            {
+                // WLOG_PRINTF("T: Bad RSN version 0x%x\n", version);
+                // WLOG_FLUSH();
+                goto skip_parse;
+            }
+
+            u32 group_cipher = getbe32(read_ptr + 2);
+            u16 read_idx = 2 + 4;
+            // WLOG_PRINTF("T: AP group cipher 0x%x\n", group_cipher);
+            // WLOG_FLUSH();
+
+            group_crypto = wmi_ieee_to_crypt(group_cipher);
+
+            u16 num_pairwise = getle16(read_ptr + read_idx);
+            read_idx += 2;
+            if (num_pairwise > 4)
+                num_pairwise = 4;
+
+            for (int i = 0; i < num_pairwise; i++)
+            {
+                u32 cipher = getbe32(read_ptr + read_idx + i * 4);
+                //WLOG_PRINTF("AP cipher 0x%x\n", cipher);
+                //WLOG_FLUSH();
+                pair_crypto = wmi_ieee_to_crypt(cipher);
+                if (pair_crypto == AP_CRYPT_AES) // use AES by default if we can
+                    break;
+            }
+            read_idx += 4 * num_pairwise;
+
+            u16 num_authkey = getle16(read_ptr + read_idx);
+            read_idx += 2;
+            if (num_authkey > 4)
+                num_authkey = 4;
+
+            for (int i = 0; i < num_authkey; i++)
+            {
+                u32 auth = getbe32(read_ptr + read_idx + i * 4);
+                // WLOG_PRINTF("T: AP auth %u 0x%x\n", i, auth);
+                // WLOG_FLUSH();
+                auth_type = auth & 0xFF;
+
+                if (auth == IEEE_AUTH_PSK)
+                    break;
+            }
+
+            if (pair_crypto == AP_CRYPT_TKIP)
+                sec_type = AP_SECURITY_WPA;
+        }
+
+skip_parse:
+        data_left -= len;
+        read_ptr += len;
+    }
+
+    Wifi_AccessPointAdd(wmi_params->bssid, wmi_params->bssid,
+                        (const void *)ap_ssid, ap_ssid_len,
+                        wifi_mhz_to_channel(wmi_params->channel), wmi_params->rssi,
+                        sec_type, group_crypto, pair_crypto, auth_type, true,
+                        NULL, NULL, 0); // TODO: Check vendor tags for Wifi_NintendoVendorInfo
+}
+
+static void wmi_handle_wmix_pkt(u16 pkt_cmd, u8* pkt_data, u32 len)
+{
+    (void)pkt_data;
+    (void)len;
+
+    switch (pkt_cmd)
+    {
+        case WMIX_DBGLOG_EVENT:
+            break;
+        default:
+            WLOG_PRINTF("T: WMIX pkt ID %x (%u B)\n", (unsigned int)pkt_cmd,
+                        (unsigned int)len);
+            WLOG_FLUSH();
+            break;
+    }
+}
+
+void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+{
+    (void)ack_len;
+
+    switch (pkt_cmd)
+    {
+        case WMI_READY_EVENT:
+        {
+            memcpy((void *)WifiData->MacAddr, pkt_data, sizeof(WifiData->MacAddr));
+            WLOG_PRINTF("T: READY_EVENT, %x\nT: MAC: %x:%x:%x:%x:%x:%x\n",
+                        pkt_data[6], pkt_data[0], pkt_data[1], pkt_data[2],
+                        pkt_data[3], pkt_data[4], pkt_data[5]);
+            WLOG_FLUSH();
+            break;
+        }
+        case WMI_REG_DOMAIN_EVENT:
+        {
+            WLOG_PRINTF("T: REG_DOMAIN_EVENT %x\n", (unsigned int)*(u32*)pkt_data);
+            WLOG_FLUSH();
+
+            // Allows more commands to be sent
+            u32 idk_addr = wifi_card_read_intern_word(wifi_card_host_interest_addr());
+            wifi_card_write_intern_word(idk_addr, 0x3); // WMI_PROTOCOL_VERSION?
+
+            wmi_set_scan_params(0, 20, 50, 0);
+
+            wmi_dbgoff();
+
+            wmi_bIsReady = true;
+
+            break;
+        }
+        case WMI_GET_CHANNEL_LIST_RESP:
+            wmi_handle_get_channel_list(pkt_data, len);
+            break;
+        case WMI_REPORT_STATISTICS_EVENT:
+            break;
+        case WMI_CMD_ERROR_EVENT:
+        {
+            WLOG_PRINTF("T: CMD_ERROR_EVENT, 0x%x 0x%x\n", *(u16*)pkt_data, pkt_data[2]);
+            WLOG_FLUSH();
+
+            wifi_card_write_func1_u32(0x400, wifi_card_read_func1_u32(0x400)); // ack ints?
+
+            u32 arg0 = 0x7F;
+            wmi_send_pkt(WMI_TARGET_ERROR_REPORT_BITMASK_CMD, MBOXPKT_REQACK, &arg0, sizeof(u32));
+
+            break;
+        }
+        case WMI_SCAN_COMPLETE_EVENT:
+            wmi_handle_scan_complete(pkt_data, len);
+            break;
+        case WMI_BSS_INFO_EVENT:
+            wmi_handle_bss_info(pkt_data, len);
+            break;
+        case WMI_EXTENSION_EVENT:
+        {
+            u16 wmix_id = *(u16*)pkt_data;
+            wmi_handle_wmix_pkt(wmix_id, &pkt_data[2], len-2);
+            break;
+        }
+        case WMI_CONNECT_EVENT:
+        {
+            WLOG_PRINTF("T: CONNECT_EVENT (%u B)\n", (unsigned int)len);
+            WLOG_FLUSH();
+
+            ap_connected = true;
+            ap_connecting = false;
+
+            if ((WifiData->curAp.security_type == AP_SECURITY_OPEN) ||
+                (WifiData->curAp.security_type == AP_SECURITY_WEP))
+            {
+                wmi_post_handshake(NULL, NULL, NULL);
+            }
+
+            break;
+        }
+        case WMI_DISCONNECT_EVENT:
+        {
+            WLOG_PRINTF("T: DISCONNECT %u, %u\n", *(u16*)pkt_data,
+                        pkt_data[8]); // Disconnect reason
+            WLOG_PRINTF("T: BSSID %x:%x:%x:%x:%x:%x\n", pkt_data[2], pkt_data[3],
+                        pkt_data[4], pkt_data[5], pkt_data[6], pkt_data[7]);
+            WLOG_FLUSH();
+
+            // TODO: Do different things depending on the disconnect reason?
+
+            ap_connected = false;
+            ap_connecting = false;
+
+            break;
+        }
+        case WMI_TKIP_MICERR_EVENT:
+        {
+            WLOG_PRINTF("T: TKIP_MICERR_EVENT 0x%x 0x%x\n", pkt_data[0], pkt_data[1]);
+            WLOG_FLUSH();
+            break;
+        }
+        case WMI_TARGET_ERROR_REPORT_EVENT:
+        {
+            u32 err_id = *(u32*)pkt_data;
+            WLOG_PRINTF("T: TARGET_ERROR_REPORT_EVENT 0x%x\n", (unsigned int)err_id);
+            WLOG_FLUSH();
+
+            u32 arg0 = 0x7F;
+            wmi_send_pkt(WMI_TARGET_ERROR_REPORT_BITMASK_CMD, MBOXPKT_REQACK, &arg0, sizeof(u32));
+
+            if (err_id == 0x8) // ???
+            {
+                wmi_disconnect_cmd();
+            }
+
+            break;
+        }
+        case WMI_NEIGHBOR_REPORT_EVENT:
+            // This is sent when the BSS we're connecting to has been found.
+            // WLOG_PRINTF("T: NEIGHBOR_REPORT_EVENT (%u B)", len);
+            // WLOG_FLUSH();
+            break;
+        case WMI_ACL_DATA_EVENT:
+            // WLOG_PRINTF("T: ACL_DATA_EVENT (%u, %u B)", len, ack_len);
+            // hexdump(pkt_data, len);
+            // WLOG_FLUSH();
+            break;
+        default:
+            WLOG_PRINTF("T: WMI pkt ID 0x%x (%u B) 0x%x\n", (unsigned int)pkt_cmd,
+                        (unsigned int)len, (unsigned int)ack_len);
+            WLOG_FLUSH();
+            break;
+    }
+}
+
+// Pkt sending
+
+static void wmi_set_bss_filter(u8 filter, u32 ieMask)
+{
+    const struct __attribute__((packed))
+    {
+        u8 bssFilter;
+        u8 align1;
+        u16 align2;
+        u32 ieMask;
+    }
+    wmi_bss_filter =
+    {
+        filter, 0, 0, ieMask
+    };
+
+    wmi_send_pkt(WMI_SET_BSS_FILTER_CMD, MBOXPKT_REQACK,
+                 (u8 *)&wmi_bss_filter, sizeof(wmi_bss_filter));
+}
+
+void wmi_set_channel_params(u16 mhz)
+{
+    const struct __attribute__((packed))
+    {
+        u8 reserved;
+        u8 scanparam; // 1 to enable scanning
+        u8 phyMode;
+        u8 numChannels;
+        u16 channelList;
+    }
+    wmi_params =
+    {
+        0, 0, 3 /* 11AG 3, 11G 2 */, 1, mhz
+    };
+
+    wmi_send_pkt(WMI_SET_CHANNEL_PARAMS_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+static void wmi_set_scan_params(u8 flags, u16 maxact_chdwell_time,
+                                u16 pas_chdwell_time, u16 minact_chdwell_time)
+{
+    const struct __attribute__((packed))
+    {
+        u16 fg_start_period; // secs
+        u16 fg_end_period; // secs
+        u16 bg_period; // secs
+        u16 maxact_chdwell_time;
+        u16 pas_chdwell_time;
+        u8 shortScanRatio;
+        u8 scanCtrlFlags;
+        u16 minact_chdwell_time;
+        u16 maxact_scan_per_ssid;
+        u32 max_dfsch_act_time;
+    }
+    wmi_params =
+    {
+        0xFFFF, 0xFFFF, 0xFFFF, maxact_chdwell_time, pas_chdwell_time,
+        3, flags, minact_chdwell_time, 0, 0
+    };
+
+    wmi_send_pkt(WMI_SET_SCAN_PARAMS_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+void wmi_start_scan(void)
+{
+    const struct __attribute__((packed))
+    {
+        u32 forceFgScan;
+        u32 isLegacy; // Legacy Cisco AP
+        u32 homeDwellTime;
+        u32 forceScanInterval;
+        u8 scanType;
+        u8 numChannels;
+        u16 channelList;
+    }
+    wmi_params =
+    {
+        0, 0, 20, 0, 0, 0, 0
+    };
+
+    wmi_is_scanning = true;
+
+    wmi_send_pkt(WMI_START_SCAN_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+void wmi_connect_cmd(void)
+{
+    WLOG_PRINTF("T: CONNECT_CMD (Security: %s)\nT: SSID: [%s]\n",
+                Wifi_ApSecurityTypeString(WifiData->curAp.security_type),
+                (const char *)&WifiData->curAp.ssid[0]);
+    WLOG_FLUSH();
+
+    if (WifiData->curAp.security_type == AP_SECURITY_OPEN)
+    {
+        size_t ssid_len = WifiData->curAp.ssid_len;
+        u32 mhz = wifi_channel_to_mhz(WifiData->curAp.channel);
+
+        struct __attribute__((packed))
+        {
+            u8 networkType;
+            u8 dot11AuthMode;
+            u8 authMode;
+            u8 pairwiseCryptoType;
+            u8 pairwiseCryptoLen;
+            u8 groupCryptoType;
+            u8 groupCryptoLen;
+            u8 ssidLength;
+            char ssid[0x20];
+            u16 channel;
+            u8 bssid[6];
+            u32 ctrl_flags;
+            // Some documentation says that ctrl_flags is u8 or u16, but the DSi
+            // hangs if u16 is used.
+        }
+        wmi_params =
+        {
+            1, 1, 1, 1, 0, 1, 0, ssid_len, {0}, mhz, {0},
+            DEFAULT_WMI_CONNECT_CTRL_FLAGS
+        };
+
+        strcpy(wmi_params.ssid, (const char *)&WifiData->curAp.ssid[0]);
+        memcpy(wmi_params.bssid, (const char *)&WifiData->curAp.bssid[0], 6);
+
+        wmi_send_pkt(WMI_CONNECT_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+    }
+    else if (WifiData->curAp.security_type == AP_SECURITY_WEP)
+    {
+        size_t ssid_len = WifiData->curAp.ssid_len;
+        u32 mhz = wifi_channel_to_mhz(WifiData->curAp.channel);
+
+        // Keys have to be set before connect
+        wmi_add_cipher_key(0, 3, (const void*)WifiData->curApSecurity.pass, NULL);
+        wmi_add_cipher_key(1, 1, (const void*)WifiData->curApSecurity.pass, NULL);
+        wmi_add_cipher_key(2, 1, (const void*)WifiData->curApSecurity.pass, NULL);
+        wmi_add_cipher_key(3, 1, (const void*)WifiData->curApSecurity.pass, NULL);
+
+        struct __attribute__((packed))
+        {
+            u8 networkType;
+            u8 dot11AuthMode;
+            u8 authMode;
+            u8 pairwiseCryptoType;
+            u8 pairwiseCryptoLen;
+            u8 groupCryptoType;
+            u8 groupCryptoLen;
+            u8 ssidLength;
+            char ssid[0x20];
+            u16 channel;
+            u8 bssid[6];
+            u32 ctrl_flags;
+        }
+        wmi_params =
+        {
+            1, 2, 1, AP_CRYPT_WEP, 0, AP_CRYPT_WEP, 0, ssid_len, {0}, mhz, {0},
+            DEFAULT_WMI_CONNECT_CTRL_FLAGS
+        };
+
+        strcpy(wmi_params.ssid, (const char *)&WifiData->curAp.ssid[0]);
+        memcpy(wmi_params.bssid, (const char *)&WifiData->curAp.bssid[0], 6);
+
+        wmi_send_pkt(WMI_CONNECT_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+    }
+    else //if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    {
+        size_t ssid_len = WifiData->curAp.ssid_len;
+        u32 mhz = wifi_channel_to_mhz(WifiData->curAp.channel);
+
+        struct __attribute__((packed))
+        {
+            u8 networkType;
+            u8 dot11AuthMode;
+            u8 authMode;
+            u8 pairwiseCryptoType;
+            u8 pairwiseCryptoLen;
+            u8 groupCryptoType;
+            u8 groupCryptoLen;
+            u8 ssidLength;
+            char ssid[0x20];
+            u16 channel;
+            u8 bssid[6];
+            u32 ctrl_flags;
+        }
+        wmi_params =
+        {
+            1, 1, 5, WifiData->curAp.pair_crypt_type, 0,
+            WifiData->curAp.group_crypt_type, 0, ssid_len, {0}, mhz, {0},
+            DEFAULT_WMI_CONNECT_CTRL_FLAGS
+        };
+
+        strcpy(wmi_params.ssid, (const char *)&WifiData->curAp.ssid[0]);
+        memcpy(wmi_params.bssid, (const char *)&WifiData->curAp.bssid[0], 6);
+
+        wmi_send_pkt(WMI_CONNECT_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+    }
+}
+
+void wmi_disconnect_cmd(void)
+{
+    ap_connecting = false;
+
+    // This command doesn't have any parameter. If any parameter is passed to it
+    // the command won't work.
+    wmi_send_pkt(WMI_DISCONNECT_CMD, MBOXPKT_REQACK, NULL, 0);
+}
+
+static void wmi_create_pstream(void)
+{
+    struct __attribute__((packed))
+    {
+        u32 minServiceInt;
+        u32 maxServiceInt;
+        u32 inactivityInt;
+        u32 suspensionInt;
+        u32 serviceStartTime;
+        u32 minDataRate;
+        u32 meanDataRate;
+        u32 peakDataRate;
+        u32 maxBurstSize;
+        u32 delayBound;
+        u32 minPhyRate;
+        u32 sba;
+        u32 mediumTime;
+        u16 nominalMSDU;
+        u16 maxMSDU;
+        u8 trafficClass;
+        u8 trafficDirection;
+        u8 rxQueueNum;
+        u8 trafficType;
+        u8 voicePSCapability;
+        u8 tsid;
+        u8 userPriority;
+        //u8 nominalPHY;
+    }
+    wmi_params =
+    {
+        20, 20, 9999999, -1, 0, 83200, 83200, 83200, 0, 0, 6000000, 8192, 0, 0x80D0,
+        0x0D0, 0, 2, 0xFF, 1, 0, 5, 0
+    };
+
+    wmi_send_pkt(WMI_CREATE_PSTREAM_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+// TODO: Unused
+#if 0
+static void wmi_set_bitrate(void)
+{
+    struct __attribute__((packed))
+    {
+        u8 rateIndex;
+        u8 mgmtRateIndex;
+        u8 ctlRateIndex;
+    }
+    wmi_params =
+    {
+        0xFF, 0, 0
+    };
+
+    wmi_send_pkt(WMI_SET_BITRATE_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+static void wmi_set_framerate(void)
+{
+    struct __attribute__((packed))
+    {
+        u8 bEnableMask;
+        u8 frameType;
+        u16 frameRateMask;
+    }
+    wmi_params =
+    {
+        1, 0xa4, 0xFFF7
+    };
+
+    wmi_send_pkt(WMI_SET_FRAMERATES_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+static void wmi_set_tx_power(void)
+{
+    struct __attribute__((packed))
+    {
+        u8 dbm;
+    }
+    wmi_params =
+    {
+        255
+    };
+
+    wmi_send_pkt(WMI_SET_TX_PWR_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+#endif
+
+void wmi_dbgoff(void)
+{
+    struct __attribute__((packed))
+    {
+        u32 cmd;
+        u32 param;
+        u32 param2;
+    }
+    wmi_params =
+    {
+        WMIX_DBGLOG_CFG_MODULE_CMD, 0xFFFFFFFF, 0
+    };
+
+    wmi_send_pkt(WMI_WMIX_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+static void wmi_add_cipher_key(u8 idx, u8 usage, const u8 *key, const u8 *rsc)
+{
+    u8 crypt_type = (usage == 1) ?
+                    WifiData->curAp.group_crypt_type : AP_CRYPT_AES /* WPA2, AES */;
+    u8 crypt_keylen = (crypt_type == AP_CRYPT_TKIP) ? 0x20 : 0x10;
+
+    // Figure out the correct keylens for WEP; WEP40 vs WEP104 vs WEP128(?)
+    if (WifiData->curAp.security_type == AP_SECURITY_WEP)
+    {
+        crypt_type = AP_CRYPT_WEP;
+
+        crypt_keylen = WifiData->curApSecurity.pass_len;
+    }
+
+    struct __attribute__((packed))
+    {
+        u8 keyIndex;
+        u8 keyType;
+        u8 keyUsage;
+        u8 keyLength;
+        u8 keyRSC[8];
+        u8 key[32];
+        u8 key_op_ctrl;
+    }
+    wmi_params =
+    {
+        idx, crypt_type, usage, crypt_keylen, {0}, {0}, 3
+    };
+
+    memcpy(wmi_params.key, key, crypt_keylen < 0x10 ? crypt_keylen : 0x10);
+
+    if (crypt_keylen > 0x10)
+    {
+        memcpy(wmi_params.key+0x10, key+0x18, 0x8);
+        memcpy(wmi_params.key+0x18, key+0x10, 0x8);
+    }
+
+    if (rsc)
+        memcpy(wmi_params.keyRSC, rsc, 8);
+
+    wmi_send_pkt(WMI_ADD_CIPHER_KEY_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+}
+
+// Utilty functions
+
+void wmi_scan_mode_start(void)
+{
+    WLOG_PUTS("T: Scan mode init\n");
+    WLOG_FLUSH();
+
+    device_cur_channel_idx = 0;
+
+    int lock = enterCriticalSection();
+
+    // Begin connecting...
+    u32 arg0 = 0x7F;
+    wmi_send_pkt(WMI_TARGET_ERROR_REPORT_BITMASK_CMD, MBOXPKT_REQACK, &arg0, sizeof(u32));
+
+    arg0 = 0;
+    wmi_send_pkt(WMI_SET_HEARTBEAT_TIMEOUT_CMD, MBOXPKT_REQACK, &arg0, sizeof(u32));
+
+    //if (!device_num_channels)
+        wmi_send_pkt(WMI_GET_CHANNEL_LIST_CMD, MBOXPKT_REQACK, NULL, 0);
+
+    wmi_set_bss_filter(0, 0); // scan for beacons
+
+    const struct __attribute__((packed))
+    {
+        u8 entryIndex;
+        u8 flag;
+        u8 ssidLen;
+        char ssid[32];
+    }
+    wmi_probed_ssid =
+    {
+        0, 0, 0, {0}
+    };
+
+    wmi_send_pkt(WMI_SET_PROBED_SSID_CMD, MBOXPKT_REQACK, &wmi_probed_ssid, sizeof(wmi_probed_ssid));
+
+    leaveCriticalSection(lock);
+}
+
+void wmi_scan_mode_tick(void)
+{
+    if (!device_num_channels)
+        return;
+
+    if (!wmi_is_scanning)
+    {
+        Wifi_AccessPointTick();
+
+        u16 mhz = channel_freqs[device_cur_channel_idx];
+
+        // WLOG_PRINTF("Scanning channel %u (%u)\n", device_cur_channel_idx, mhz);
+        // WLOG_FLUSH();
+
+        device_cur_channel_idx++;
+        if (device_cur_channel_idx >= device_num_channels)
+            device_cur_channel_idx = 0;
+
+        if (!mhz)
+            return;
+
+        wmi_set_channel_params(mhz);
+        wmi_set_scan_params(1, 20, 50, 0);
+        wmi_set_bss_filter(1,0);
+
+        wmi_start_scan();
+    }
+}
+
+void wmi_connect(void)
+{
+    if (ap_connecting)
+        return;
+
+    ap_connecting = true;
+
+    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    {
+        // Check if we have a PMK. If we're connecting to a WFC Access Point
+        // this will be set, but it won't be set if the user has given us the
+        // password directly.
+        bool has_pmk = false;
+        for (size_t i = 0; i < sizeof(WifiData->curApSecurity.pmk); i++)
+        {
+            if (WifiData->curApSecurity.pmk[i] != 0)
+            {
+                has_pmk = true;
+                break;
+            }
+        }
+
+        if (has_pmk)
+        {
+            WLOG_PUTS("T: PMK provided\n");
+            WLOG_FLUSH();
+        }
+        else
+        {
+            WLOG_PUTS("T: Calculating PMK\n");
+            WLOG_FLUSH();
+
+            // This calculation takes about 5 seconds, let's allow interrupts
+            u32 old_ime = REG_IME;
+            REG_IME = 1;
+
+            if (wpa_calc_pmk((const char *)WifiData->curAp.ssid,
+                             (const char *)WifiData->curApSecurity.pass,
+                             (u8 *)WifiData->curApSecurity.pmk) != 0)
+            {
+                WLOG_PUTS("T: PMK calculation failed\n");
+                WLOG_FLUSH();
+                ap_connecting = false;
+                REG_IME = old_ime;
+                return;
+            }
+
+            REG_IME = old_ime;
+
+            WLOG_PUTS("T: PMK calculated\n");
+            WLOG_FLUSH();
+        }
+
+        // Reset WPA handshake state
+        has_sent_hs2 = false;
+        has_sent_hs4 = false;
+    }
+
+    wmi_set_bss_filter(4, 0); // current beacon
+    wmi_set_scan_params(5, 200, 200, 200);
+
+    wmi_set_channel_params(wifi_channel_to_mhz(WifiData->curAp.channel));
+
+    //u16 tmp16 = 0xFFF;
+    //wmi_send_pkt(WMI_SET_FIXRATES_CMD, MBOXPKT_REQACK, &tmp16, sizeof(tmp16));
+
+    //wmi_set_bitrate();
+    //wmi_set_framerate();
+
+    u8 tmp8 = 0;
+    wmi_idk = 0x2008;
+    wmi_send_pkt(WMI_SYNCHRONIZE_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8)); // 0x2008?
+    wmi_idk = 0;
+
+    tmp8 = 2;
+    wmi_send_pkt(WMI_SET_POWER_MODE_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8));
+
+    tmp8 = 0;
+    wmi_send_pkt(WMI_SYNCHRONIZE_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8)); // 0x0?
+
+    wmi_create_pstream();
+
+    tmp8 = 0;
+    wmi_send_pkt(WMI_SET_WSC_STATUS_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8));
+
+    tmp8 = 5; // 5 seconds
+    wmi_send_pkt(WMI_SET_DISCONNECT_TIMEOUT_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8));
+
+    tmp8 = 0;
+    wmi_send_pkt(WMI_SET_KEEPALIVE_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8));
+
+    wmi_connect_cmd();
+}
+
+bool wmi_is_ready(void)
+{
+    return wmi_bIsReady;
+}
+
+static void wmi_post_handshake(const u8 *tk, const gtk_keyinfo *gtk_info, const u8 *rsc)
+{
+    u8 tmp8 = 1;
+    wmi_send_pkt(WMI_SYNCHRONIZE_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8)); // 0x0?
+
+    u16 dummy = 0x0200;
+    data_send_pkt((u8*)&dummy, sizeof(dummy));
+    data_send_pkt((u8*)&dummy, sizeof(dummy));
+
+    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    {
+        wmi_add_cipher_key(0, 0, tk, NULL);
+
+        wmi_add_cipher_key(gtk_info->keyidx, 1, gtk_info->key, rsc);
+        WLOG_PRINTF("T: Added GTK 0x%x\n", gtk_info->keyidx);
+        WLOG_FLUSH();
+    }
+
+    tmp8 = 1;
+    wmi_send_pkt(WMI_SYNCHRONIZE_CMD, MBOXPKT_REQACK, &tmp8, sizeof(tmp8)); // 0x0?
+
+    // Helps somewhat with some APs? Limited by region info.
+    //wmi_set_tx_power();
+}
+
+//
+// WPA
+//
+
+static void data_send_wpa_handshake2(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt)
+{
+    u8 mic_out[16];
+    struct __attribute__((packed))
+    {
+        u8 idk[2];
+        u8 dst_bssid[6]; // AP MAC
+        u8 src_bssid[6]; // 3DS MAC
+        u8 data_len_be[2];
+        u8 snap_hdr[8];
+
+        u8 version;
+        u8 type;
+        u8 len_be[2];
+        u8 keydesc_type;
+        u8 keyinfo_be[2];
+        u8 keylen_be[2];
+        u8 replay_counter_be[8];
+        u8 wpa_nonce[32];
+        u8 wpa_iv[16];
+        u8 wpa_rsc[8];
+        u8 wpa_key_id[8];
+        u8 wpa_key_mic[16];
+        u8 wpa_keydata_len_be[2];
+        u8 wpa_keydata[0x16];
+        u8 end[];
+    }
+    data_hdr =
+    {
+        { 0x00, 0x1C }, {0}, {0}, {0},
+        { 0xAA, 0xAA, 0x03, 0, 0, 0, 0x88, 0x8E }, // SNAP
+        1, 3, {0}, 2, {0}, {0,0}, {0}, {0}, {0}, {0}, {0}, {0}, {0},
+        {
+            0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac,
+            WifiData->curAp.group_crypt_type == AP_CRYPT_AES ? 0x04 : 0x02, 0x01, 0x00, 0x00,
+            0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00
+        }
+    };
+
+    u16 total_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.idk;
+    u16 data_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.snap_hdr;
+    u16 auth_len = (intptr_t)data_hdr.end - (intptr_t)&data_hdr.keydesc_type;
+
+    memcpy(data_hdr.dst_bssid, dst_bssid, 6);
+    memcpy(data_hdr.src_bssid, src_bssid, 6);
+
+    putbe16(data_hdr.data_len_be, data_len);
+    putbe16(data_hdr.len_be, auth_len);
+    putbe16(data_hdr.keyinfo_be, 0x010A);
+    putbe16(data_hdr.keylen_be, 0);
+    putbe64(data_hdr.replay_counter_be, replay_cnt);
+
+    u8 test_nonce[32];
+    for (size_t i = 0; i < sizeof(test_nonce); i++)
+        test_nonce[i] = Wifi_Random();
+
+    memcpy(data_hdr.wpa_nonce, test_nonce, 32);
+    putbe16(data_hdr.wpa_keydata_len_be, 0x16);
+
+    memcpy(device_nonce, data_hdr.wpa_nonce, 32);
+
+    wpa_calc_ptk(src_bssid, dst_bssid, device_nonce, device_ap_nonce,
+                 (const void *)WifiData->curApSecurity.pmk, &device_ptk);
+
+    wpa_calc_mic(device_ptk.kck, (u8*)&data_hdr.version, auth_len + 4, mic_out);
+    memcpy(data_hdr.wpa_key_mic, mic_out, 16);
+
+    data_send_pkt((u8*)&data_hdr, total_len);
+
+    has_sent_hs2 = true;
+}
+
+static void data_send_wpa_handshake4(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt)
+{
+    u8 mic_out[16];
+    struct __attribute__((packed))
+    {
+        u8 idk[2];
+        u8 dst_bssid[6]; // AP MAC
+        u8 src_bssid[6]; // DSi MAC
+        u8 data_len_be[2];
+        u8 snap_hdr[8];
+
+        u8 version;
+        u8 type;
+        u8 len_be[2];
+        u8 keydesc_type;
+        u8 keyinfo_be[2];
+        u8 keylen_be[2];
+        u8 replay_counter_be[8];
+        u8 wpa_nonce[32];
+        u8 wpa_iv[16];
+        u8 wpa_rsc[8];
+        u8 wpa_key_id[8];
+        u8 wpa_key_mic[16];
+        u8 wpa_keydata_len_be[2];
+        u8 end[];
+    }
+    data_hdr =
+    {
+        { 0x00, 0x1C }, {0}, {0}, {0},
+        { 0xAA, 0xAA, 0x03, 0, 0, 0, 0x88, 0x8E }, // SNAP
+        1, 3, {0}, 2, {0}, {0,0},
+        {0}, {0}, {0}, {0}, {0}, {0}, {0}
+    };
+
+    u16 total_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.idk;
+    u16 data_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.snap_hdr;
+    u16 auth_len = (intptr_t)data_hdr.end - (intptr_t)&data_hdr.keydesc_type;
+
+    memcpy(data_hdr.dst_bssid, dst_bssid, 6);
+    memcpy(data_hdr.src_bssid, src_bssid, 6);
+
+    putbe16(data_hdr.data_len_be, data_len);
+    putbe16(data_hdr.len_be, auth_len);
+    putbe16(data_hdr.keyinfo_be, 0x030A);
+    putbe16(data_hdr.keylen_be, 0);
+    putbe64(data_hdr.replay_counter_be, replay_cnt);
+
+    putbe16(data_hdr.wpa_keydata_len_be, 0);
+
+    wpa_calc_mic(device_ptk.kck, (u8*)&data_hdr.version, auth_len+4, mic_out);
+    memcpy(data_hdr.wpa_key_mic, mic_out, 16);
+
+    data_send_pkt((u8*)&data_hdr, total_len);
+
+    has_sent_hs4 = true;
+}
+
+static void data_send_wpa_gtkrenew(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt)
+{
+    u8 mic_out[16];
+    struct __attribute__((packed))
+    {
+        u8 idk[2];
+        u8 dst_bssid[6]; // AP MAC
+        u8 src_bssid[6]; // 3DS MAC
+        u8 data_len_be[2];
+        u8 snap_hdr[8];
+
+        u8 version;
+        u8 type;
+        u8 len_be[2];
+        u8 keydesc_type;
+        u8 keyinfo_be[2];
+        u8 keylen_be[2];
+        u8 replay_counter_be[8];
+        u8 wpa_nonce[32];
+        u8 wpa_iv[16];
+        u8 wpa_rsc[8];
+        u8 wpa_key_id[8];
+        u8 wpa_key_mic[16];
+        u8 wpa_keydata_len_be[2];
+        u8 end[];
+    }
+    data_hdr =
+    {
+        { 0x00, 0x1C }, {0}, {0}, {0}, { 0xAA,0xAA,0x03,0,0,0, 0x88, 0x8E },
+        1, 3, {0}, 2, {0}, {0,0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}
+    };
+
+    u16 total_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.idk;
+    u16 data_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.snap_hdr;
+    u16 auth_len = (intptr_t)data_hdr.end - (intptr_t)&data_hdr.keydesc_type;
+
+    memcpy(data_hdr.dst_bssid, dst_bssid, 6);
+    memcpy(data_hdr.src_bssid, src_bssid, 6);
+
+    putbe16(data_hdr.data_len_be, data_len);
+    putbe16(data_hdr.len_be, auth_len);
+    putbe16(data_hdr.keyinfo_be, 0x0302);
+    putbe16(data_hdr.keylen_be, 0);
+    putbe64(data_hdr.replay_counter_be, replay_cnt);
+
+    putbe16(data_hdr.wpa_keydata_len_be, 0);
+
+    wpa_calc_mic(device_ptk.kck, (u8*)&data_hdr.version, auth_len + 4, mic_out);
+    memcpy(data_hdr.wpa_key_mic, mic_out, 16);
+
+    data_send_pkt((u8*)&data_hdr, total_len);
+
+    has_sent_hs4 = true;
+}
+
+// Send a raw Ethernet ARP+SNAP
+void data_send_link(void *ip_data, u32 ip_data_len)
+{
+    data_send_pkt_idk(ip_data, ip_data_len);
+}
+
+void data_handle_auth(u8 *pkt_data, u32 len, const u8* dev_bssid, const u8 *ap_bssid_)
+{
+    (void)len;
+
+    struct __attribute__((packed))
+    {
+        u8 version;
+        u8 type;
+        u8 len_be[2];
+        u8 keydesc_type;
+        u8 keyinfo_be[2];
+        u8 keylen_be[2];
+        u8 replay_counter_be[8];
+        u8 wpa_nonce[32];
+        u8 wpa_iv[16];
+        u8 wpa_rsc[8];
+        u8 wpa_key_id[8];
+        u8 wpa_key_mic[16];
+        u8 wpa_keydata_len_be[2];
+        u8 body[];
+    }
+    *auth_hdr = (void*)pkt_data;
+
+    u16 keyinfo = getbe16(auth_hdr->keyinfo_be);
+    u16 keydata_len = getbe16(auth_hdr->wpa_keydata_len_be);
+    u64 replay = getbe64(auth_hdr->replay_counter_be);
+
+    // TODO: Use bitmasks instead of constants
+    // TODO: 0x1382, Group Message (1/2)
+    // TODO: WPA?
+    // If not handled, disconnects and reconnects
+
+    if (keyinfo == 0x008A)
+    {
+        WLOG_PUTS("T: WPA2 Handshake 1/4\n");
+        WLOG_FLUSH();
+
+        memcpy(device_ap_nonce, auth_hdr->wpa_nonce, 32);
+
+        data_send_wpa_handshake2(ap_bssid_, dev_bssid, replay);
+
+        //hexdump(mbox_out_buffer, 0x90);
+    }
+    else if (keyinfo == 0x13CA)
+    {
+        WLOG_PUTS("T: WPA2 Handshake 3/4\n");
+        WLOG_FLUSH();
+
+        // TODO verify MIC
+        memcpy(device_ap_mic, auth_hdr->wpa_key_mic, 16);
+
+        // Send our OK before we actually load keys
+        data_send_wpa_handshake4(ap_bssid_, dev_bssid, replay);
+
+        // Decrypt GTK and send AR6014 our generated encryption keys
+        wpa_decrypt_gtk(device_ptk.kek, auth_hdr->body, keydata_len, &device_gtk_keyinfo);
+        wmi_post_handshake(device_ptk.tk, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+    }
+    else if (keyinfo == 0x1382)
+    {
+        WLOG_PUTS("T: Group message\n");
+        WLOG_FLUSH();
+
+        // Send our OK before we actually load keys
+        data_send_wpa_gtkrenew(ap_bssid_, dev_bssid, replay);
+
+        // Decrypt GTK and send AR6014 our generated encryption keys
+        wpa_decrypt_gtk(device_ptk.kek, auth_hdr->body, keydata_len, &device_gtk_keyinfo);
+        wmi_post_handshake(device_ptk.tk, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+    }
+    else
+    {
+        WLOG_PRINTF("T: Unk Auth Pkt: 0x%x\n", keyinfo);
+        //hexdump(pkt_data, len);
+    }
+
+    WLOG_PUTS("T: Handshake step done\n");
+    WLOG_FLUSH();
+}
+
+bool wmi_handshake_done(void)
+{
+    return has_sent_hs4;
+}

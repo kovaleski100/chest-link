@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (C) 2005-2006 Stephen Stair - sgstair@akkit.org - http://www.akkit.org
+// Copyright (C) 2025 Antonio Niño Díaz
+
+#ifndef NETINET_IN_H__
+#define NETINET_IN_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <sys/socket.h>
+
+#define INADDR_ANY       0x00000000
+#define INADDR_BROADCAST 0xFFFFFFFF
+#define INADDR_NONE      0xFFFFFFFF
+
+typedef uint32_t in_addr_t;
+
+struct in_addr
+{
+    in_addr_t s_addr;
+};
+
+struct in6_addr {
+    union {
+        uint32_t u32_addr[4];
+        uint8_t  u8_addr[16];
+    } un;
+#define s6_addr  un.u8_addr
+};
+
+typedef uint16_t in_port_t;
+
+struct sockaddr_in
+{
+    uint8_t         sin_len;
+    sa_family_t     sin_family;
+    in_port_t       sin_port;
+    struct in_addr  sin_addr;
+    unsigned char   sin_zero[8];
+};
+
+struct sockaddr_in6 {
+    uint8_t         sin6_len;      // length of this structure
+    sa_family_t     sin6_family;   // AF_INET6
+    in_port_t       sin6_port;     // Transport layer port number
+    uint32_t        sin6_flowinfo; // IPv6 flow information
+    struct in6_addr sin6_addr;     // IPv6 address
+    uint32_t        sin6_scope_id; // Set of interfaces for scope
+};
+
+#define IP4ADDR_STRLEN_MAX  16
+#define IP6ADDR_STRLEN_MAX  46
+
+#define INET_ADDRSTRLEN     IP4ADDR_STRLEN_MAX
+#define INET6_ADDRSTRLEN    IP6ADDR_STRLEN_MAX
+
+extern const struct in6_addr in6addr_any;
+
+#include <arpa/inet.h>
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // NETINET_IN_H__

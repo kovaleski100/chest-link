@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chest Link — Transfer Hub</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/dex.css"><link rel="stylesheet" href="/native-saves.css">
+</head>
+<body>
+<div class="app-shell">
+<header class="topbar">
+  <div class="brand"><span class="eyebrow">LOCAL TRANSFER HUB</span><h1>Chest Link <span>0.4</span></h1><p>Organize cópias e encaminhe Pokémon entre os seus dispositivos.</p></div>
+  <div class="connection-card"><div><span class="status-dot"></span><strong>Servidor online</strong><span id="connection">Conectando…</span></div><button id="refresh" class="button secondary">Atualizar</button></div>
+</header>
+<nav class="main-nav" aria-label="Seções do Chest Link"><button id="nav-boxes" class="main-nav-button active" aria-current="page">Bancos</button><button id="nav-dex" class="main-nav-button">Pokédex</button><button id="nav-native" class="main-nav-button">Native Saves</button></nav>
+<main class="layout" id="boxes-view">
+  <aside class="sidebar">
+    <div class="section-title"><div><span class="eyebrow">ARQUIVO</span><h2>Cópias no PC</h2></div><span id="total-count" class="count">0</span></div>
+    <p class="muted">Cópias recebidas dos consoles. Escolhe o destino ao encaminhar pelo PC; o original permanece guardado.</p>
+    <section class="ds-hotspot" aria-labelledby="hotspot-title">
+      <span class="eyebrow">REDE LOCAL</span><h3 id="hotspot-title">Consoles DS e 3DS</h3>
+      <p>Rede temporária 2,4 GHz. Conecta os consoles ao PC e permite transferências diretas entre eles.</p>
+      <p id="hotspot-state" class="hotspot-state" role="status">Verificando suporte…</p>
+      <button id="hotspot-toggle" class="button secondary" type="button" disabled>Iniciar rede para consoles</button>
+    </section>
+    <div class="filters" role="group" aria-label="Filtrar cópias"><button data-filter="0" aria-pressed="true">Todas</button><button data-filter="3">Sem destino <span id="unassigned-count">0</span></button><button data-filter="1">DS <span id="ds-count">0</span></button><button data-filter="2">3DS <span id="3ds-count">0</span></button></div>
+    <div class="filters" role="group" aria-label="Fila de envios"><button id="clear-pending" class="button danger" type="button" disabled>Limpar pendências <span id="pending-count">0</span></button></div>
+    <label class="search">Buscar por nome ou ID<input id="search" type="search" placeholder="Ex.: SoulSilver"></label>
+    <div id="banks" role="listbox" aria-label="Bancos guardados"></div>
+    <div class="sidebar-note"><strong>Como funciona</strong><p>O console guarda a cópia no PC sem escolher o destinatário. Usa os botões de envio para definir DS ou 3DS quando quiser encaminhá-la. <b>Limpar pendências</b> tira cópias da fila, mas mantém os pacotes no servidor como backup e na Pokédex.</p></div>
+  </aside>
+  <section class="workspace" aria-label="Área de seleção">
+    <div class="workspace-head"><div><span class="eyebrow">SELEÇÃO</span><h2 id="workspace-title">Nenhum banco selecionado</h2><p id="workspace-subtitle" class="muted">Escolha uma cópia na lista para começar.</p></div><div class="box-picker"><button id="prev-box" class="icon-button" aria-label="Box anterior">‹</button><label>Box<select id="box-select" disabled aria-label="Escolher box"></select></label><button id="next-box" class="icon-button" aria-label="Próxima box">›</button></div></div>
+    <div class="stats" aria-live="polite"><div><span class="stat-label">Estado</span><strong id="status">Aguardando uma cópia</strong></div><div><span class="stat-label">Seleção</span><strong id="selection-count">Nenhuma</strong></div><div><span class="stat-label">Conexão</span><strong id="connection-short">—</strong></div></div>
+    <div class="box-card"><div class="box-card-head"><div><span id="box-label" class="eyebrow">BOX</span><h3 id="box-name">Selecione um banco</h3></div><span id="box-position" class="muted">—</span></div><div id="pokemon-grid" class="pokemon-grid" role="grid" aria-label="Pokémon da box"></div><div class="grid-foot"><span>30 espaços por box</span><span>Setas navegam · A/Espaço marcam</span></div></div>
+    <section class="organize-panel" aria-label="Organizar Pokémon"><div class="sort-controls"><label>Ordenar esta box por<select id="sort-by" aria-label="Ordenar box por"><option value="name">Nome</option><option value="level">Level</option><option value="id">ID do Pokémon</option></select></label><button id="sort-box" class="button secondary" type="button" disabled>Ordenar</button><button id="compact-box" class="button secondary" type="button" aria-label="Otimizar espaços de todas as boxes preservando a ordem" title="Reúne os Pokémon de todas as boxes em sequência, sem mudar a ordem" disabled>Otimizar todas as boxes</button></div><div class="living-dex-control"><div><strong>Living Dex</strong><span>Segue a ordem da National Dex. Repetidos ficam juntos e deslocam as espécies seguintes; ovos e registros desconhecidos vão para Extras.</span></div><button id="living-dex" class="button primary" type="button" disabled>Mapear Living Dex</button></div></section>
+    <div class="actions"><button id="clear" class="button secondary danger" disabled>Limpar seleção</button><button id="to-ds" class="button primary" disabled>Enviar seleção ao DS</button><button id="to-3ds" class="button primary" disabled>Enviar seleção ao 3DS</button></div>
+    <p id="status-detail" class="status-detail" role="status" aria-live="polite">As cópias são verificadas antes de serem encaminhadas.</p>
+  </section>
+</main>
+<main class="dex-view" id="dex-view" hidden>
+  <section class="dex-intro"><div><span id="dex-eyebrow" class="eyebrow">POKÉMON HOME · CATÁLOGO NACIONAL</span><h2>Pokédex</h2><p id="dex-intro-copy">Acompanhe sua coleção nacional e o progresso regional por jogo.</p></div><div class="dex-progress-grid"><div class="dex-progress"><span>Regional Dex</span><strong id="dex-regional-total">—</strong><span id="dex-regional-summary">Carregando progresso regional…</span></div><div class="dex-progress"><span>National Dex</span><strong id="dex-national-total">—</strong><span id="dex-national-summary">Carregando coleção nacional…</span></div></div></section>
+  <section id="dex-error" class="dex-error" role="alert" hidden><div><strong>Não foi possível carregar a Pokédex.</strong><span id="dex-error-message">Confere a conexão com o servidor e tenta novamente.</span></div><button id="dex-retry" class="button secondary" type="button">Tentar novamente</button></section>
+  <section class="dex-controls" aria-label="Filtros da Pokédex">
+    <div class="dex-game-row">
+      <label class="dex-generation"><span class="control-label">Geração</span><select id="dex-generation" aria-label="Escolher geração"><option value="home" selected>Pokémon HOME · Nacional</option><option value="1">Geração I · Kanto</option><option value="2" disabled>Geração II · em breve</option><option value="3" disabled>Geração III · em breve</option><option value="4" disabled>Geração IV · em breve</option><option value="5" disabled>Geração V · em breve</option><option value="6" disabled>Geração VI · em breve</option><option value="7" disabled>Geração VII · em breve</option><option value="8" disabled>Geração VIII · em breve</option><option value="9" disabled>Geração IX · em breve</option></select></label>
+      <div class="dex-game-control"><span id="dex-game-label" class="control-label">Catálogo</span><div id="dex-games" class="dex-games" role="group" aria-label="Escolher jogo ou catálogo"></div></div>
+    </div>
+    <div class="dex-filter-row">
+      <div id="dex-pool-control" class="dex-pool-control"><span class="control-label">Lista</span><div class="dex-pool" role="group" aria-label="Filtrar espécies"><button data-pool="available" aria-pressed="true">Disponíveis no jogo</button><button data-pool="all" aria-pressed="false">Todos os 151</button></div></div>
+      <div class="dex-control-block"><span class="control-label">Progresso</span><div class="dex-mode" role="group" aria-label="Modo da Pokédex"><button data-mode="unified" aria-pressed="true">Unificada</button><button data-mode="individual" aria-pressed="false">Individual</button></div></div>
+      <label class="dex-search">Buscar Pokémon<input id="dex-search" type="search" placeholder="Nome ou número"></label>
+      <label class="dex-exclusive"><input id="dex-exclusive" type="checkbox"><span>Exclusivos / indisponíveis</span></label>
+      <label class="dex-type-filter">Tipo<select id="dex-type"><option value="">Todos</option></select></label>
+    </div>
+  </section>
+  <p id="dex-game-note" class="dex-note" role="status"></p>
+  <section class="dex-layout"><div class="dex-list-panel"><div class="dex-list-head"><div><span class="eyebrow">ESPÉCIES</span><h3 id="dex-list-title">Pokémon de Kanto</h3></div><span id="dex-result-count" class="count">151</span></div><div id="dex-grid" class="dex-grid" role="list"></div></div><aside id="dex-detail" class="dex-detail" aria-live="polite"></aside></section>
+  <p class="dex-sources">Dados de espécies e exclusividades: <a href="https://pokemondb.net/pokedex/game/red-blue-yellow" target="_blank" rel="noreferrer">Pokémon Database</a>. Percentuais de slots de encontro: <a href="https://pokeapi.co/docs/v2#pokemon-encounters" target="_blank" rel="noreferrer">PokéAPI</a>. As chances são relativas aos encontros daquele local e método — não uma probabilidade por minuto ou de captura.</p>
+</main>
+<main class="native-view" id="native-view" hidden>
+  <section class="native-intro">
+    <div><span class="eyebrow">LEITURA LOCAL · SOMENTE LEITURA</span><h2>Native Saves</h2><p>Carregue no PC uma cópia bruta do save FireRed. O original não é alterado; o Chest Link guarda uma cópia identificada por SHA-256 e extrai treinador, party, boxes, Pokédex, progresso opcional e histórico do Hall da Fama.</p></div>
+    <div class="native-upload"><label for="native-file">Arquivo de save</label><input id="native-file" type="file" accept=".sav,.dsv,.dat,.bin,application/octet-stream"><button id="native-import" class="button primary" type="button">Importar cópia</button><span id="native-import-status" role="status"></span></div>
+  </section>
+  <p class="native-readonly-note">Sem escrita no save. Saves incompatíveis são identificados como não suportados; snapshots, arquivos importados e eventos permanecem na pasta de dados.</p>
+  <section class="native-controls">
+    <label>Save carregado<select id="native-snapshot-select" aria-label="Escolher save carregado"><option value="">Nenhum save disponível</option></select></label>
+    <div class="native-tabs" role="tablist" aria-label="Native Saves"><button type="button" role="tab" data-native-tab="pokedex" aria-selected="true">Pokédex</button><button type="button" role="tab" data-native-tab="journey" aria-selected="false">Journey</button><button type="button" role="tab" data-native-tab="completion" aria-selected="false">Completude</button><button type="button" role="tab" data-native-tab="miscellany" aria-selected="false">Miscelânea</button><button type="button" role="tab" data-native-tab="hall-of-fame" aria-selected="false">Hall da Fama</button></div>
+  </section>
+  <section id="native-empty" class="native-empty"><h3>Carregue o save do FireRed para começar</h3><p>O parser valida os dois slots, os checksums e os registros PK3 do dump bruto de 128 KiB antes de criar o snapshot.</p></section>
+  <section id="native-summary" class="native-summary" hidden></section>
+  <section id="native-panel" class="native-panel" hidden></section>
+</main>
+<footer>Chest Link é independente. <button id="credits" class="link-button">Créditos e licenças</button></footer>
+<dialog id="clear-pending-dialog"><span class="eyebrow">FILA DE ENVIO</span><h2>Limpar pendências?</h2><p id="clear-pending-description"></p><div class="dialog-actions"><button id="cancel-clear-pending" class="button secondary" type="button">Cancelar</button><button id="confirm-clear-pending" class="button danger" type="button">Tirar da fila</button></div></dialog>
+<dialog id="hotspot-dialog"><span class="eyebrow">REDE TEMPORÁRIA</span><h2>Iniciar rede para consoles?</h2><p>Será criada uma rede aberta de 2,4 GHz, necessária para DS/DS Lite. Dispositivos próximos poderão usar a internet do PC; o acesso à rede privada e aos outros serviços do PC continuará bloqueado. O Chest Link e a comunicação direta entre consoles ficarão disponíveis. Encerra a rede quando terminares.</p><div class="dialog-actions"><button id="cancel-hotspot" class="button secondary" type="button">Cancelar</button><button id="confirm-hotspot" class="button primary" type="button">Iniciar rede</button></div></dialog>
+<dialog id="confirm"><span class="eyebrow">CONFIRMAR ENVIO</span><h2 id="confirm-title">Encaminhar seleção?</h2><p id="confirm-description"></p><div class="dialog-fields"><label>IP do console<input id="destination-ip" inputmode="decimal" placeholder="192.168.1.42"></label><label>PIN exibido no console<input id="destination-pin" inputmode="numeric" maxlength="6" placeholder="000000"></label></div><div class="dialog-actions"><button id="cancel-send" class="button secondary">Voltar</button><button id="confirm-send" class="button primary">Enviar diretamente</button></div></dialog>
+<dialog id="credits-dialog"><span class="eyebrow">SOBRE O PROJETO</span><h2>Chest Link</h2><p>Interface de armazenamento inspirada no PKSM, adaptada para transferências locais entre Chest, PKSM e PC.</p><p>Fontes, licenças, atribuições e procedência dos recursos acompanham o pacote em <code>codigo/THIRD_PARTY.md</code>.</p><button id="close-credits" class="button secondary">Fechar</button></dialog>
+<script src="/app.js"></script>
+</div>
+</body>
+</html>

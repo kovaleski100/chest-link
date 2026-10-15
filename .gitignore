@@ -1,0 +1,5 @@
+# Local PC data contains banks, native saves, snapshots, and interface tokens.
+/PC/dados/
+
+# Released ZIP packages are preserved locally and published as release assets.
+/*.zip

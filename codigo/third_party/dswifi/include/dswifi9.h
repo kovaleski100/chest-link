@@ -1,0 +1,894 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (C) 2005-2006 Stephen Stair - sgstair@akkit.org - http://www.akkit.org
+// Copyright (C) 2025 Antonio Niño Díaz
+
+/// @file dswifi9.h
+///
+/// @brief ARM9 header of DSWifi.
+
+#ifndef DSWIFI9_H
+#define DSWIFI9_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <netinet/in.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+#include <nds/ndstypes.h>
+
+#include <dswifi_common.h>
+#include <dswifi_version.h>
+
+/// @defgroup dswifi9_general General state of the library.
+/// @{
+
+/// User code uses members of the WIFIGETDATA structure in calling
+/// Wifi_GetData() to retreive miscellaneous odd information.
+enum WIFIGETDATA
+{
+    /// MACADDRESS: returns data in the buffer, requires at least 6 bytes.
+    WIFIGETDATA_MACADDRESS,
+    /// NUM WFC APS: returns number between 0 and 3, doesn't use buffer.
+    WIFIGETDATA_NUMWFCAPS,
+    /// RSSI: returns number between 0 and 255, doesn't use buffer.
+    WIFIGETDATA_RSSI,
+
+    MAX_WIFIGETDATA
+};
+
+/// Try to initialize DSWiFi in DSi mode.
+///
+/// If the program isn't running on a DSi it will fall back to DS mode. Note
+/// that local multiplayer mode isn't supported in DSi mode.
+///
+/// @note
+///     This flag is incompatible with WIFI_LOCAL_ONLY.
+#define WIFI_ATTEMPT_DSI_MODE   (1 << 3)
+
+/// Initialize DSWiFi in DS mode, even in DSi consoles. Local multiplayer mode
+/// is supported.
+#define WIFI_DS_MODE_ONLY       (0 << 3)
+
+/// Only initialize local multiplayer mode.
+///
+/// DSWiFi is initialized, but Internet mode becomes unavailable. DSWiFi won't
+/// need to allocate any memory on the heap for the IP stack (lwIP).
+///
+/// If your game only uses local multiplayer mode, you can use this option to
+/// save RAM.
+///
+/// @note
+///     This flag is incompatible with WIFI_ATTEMPT_DSI_MODE.
+#define WIFI_LOCAL_ONLY         (1 << 2)
+
+/// Initialize both internet and local multiplayer modes.
+///
+/// Both internet and local multiplayer modes become available.
+#define WIFI_INTERNET_AND_LOCAL (0 << 2)
+
+/// Don't let the library control the LED blinking.
+#define WIFI_DISABLE_LED        (1 << 1)
+
+/// Allow the library to control how the LED blinks (DS and DS Lite only).
+#define WIFI_ENABLE_LED         (0 << 1)
+
+/// Init library and try to connect to firmware AP.
+#define WFC_CONNECT             (1 << 0)
+
+/// Init library only, don't try to connect to AP.
+#define INIT_ONLY               (0 << 0)
+
+/// Initializes WiFi library.
+///
+/// It initializes the WiFi hardware, sets up a FIFO handler to communicate with
+/// the ARM7 side of the library. The ARM7 sets up timer number
+/// LIBNDS_DEFAULT_TIMER_WIFI to be used by DSWiFi.
+///
+/// You can pass a few options depending on your needs:
+///
+/// - If INIT_ONLY is passed, the library will be initialized but it won't try
+///   to connect to any AP yet. When using local multiplayer you should start
+///   with this flag.
+///
+///   If WFC_CONNECT is used, this function will initialize the hardware and try
+///   to connect to the Access Points stored in the firmware. Wifi_InitDefault()
+///   will refuse to initiailize the library if you use this flag at the same
+///   time as WIFI_LOCAL_ONLY.
+///
+/// - WIFI_DISABLE_LED and WIFI_ENABLE_LED can be used to let DSWiFi control the
+///   LED or not. By default, DSWiFi makes the LED blink at different speeds
+///   depending on the current state of the library.
+///
+/// - By default, DSWiFi is initialized in a way that both Internet and local
+///   multiplayer mode are available. You can decide if Internet mode is
+///   available or not by using the defines WIFI_INTERNET_AND_LOCAL and
+///   WIFI_LOCAL_ONLY.
+///
+///   The function starts the library in Internet mode if it's available. If it
+///   is initialized with WIFI_LOCAL_ONLY it starts in multiplayer client mode.
+///   The developer needs to be switch to other modes if required. Remember that
+///   there are two local multiplayer modes: client and host.
+///
+/// @note
+///     WFC_CONNECT is generally discouraged outside of simple demos because
+///     Wifi_InitDefault() can't return for a few seconds until the connection
+///     has succeeded or failed.
+///
+///     Check the examples of DSWiFi to see how to connect to an AP in a more
+///     manual way that allows your application to do other things while waiting
+///     for the function to return.
+///
+/// @warning
+///     If this function hangs, make sure that you're using an ARM7 core with
+///     DSWifi support.
+///
+/// @param flags
+///     This is a combination of OR'ed flags.
+///
+/// @return
+///     It returns true on success, false on failure.
+bool Wifi_InitDefault(unsigned int flags);
+
+/// Used to determine if the library has been initialized.
+///
+/// @return
+///     1 if the library is ready, 0 otherwise.
+int Wifi_CheckInit(void);
+
+/// Stops the WiFi library.
+///
+/// It will free all RAM and resources used by the library.
+///
+/// It must be called after calling Wifi_DisableWifi() and waiting for a frame
+/// or two.
+///
+/// @return
+///     True on success, false on error.
+bool Wifi_Deinit(void);
+
+/// Instructs the ARM7 to disengage wireless and stop receiving or transmitting.
+///
+/// It keeps the library active. If you want to free all resources used by the
+/// library, call Wifi_Deinit().
+void Wifi_DisableWifi(void);
+
+/// Instructs the ARM7 to go into a basic "active" mode.
+///
+/// The hardware is powered on, but not associated or doing anything useful. It
+/// can still receive and transmit packets.
+void Wifi_EnableWifi(void);
+
+/// Checks whether a library mode change has finished or not.
+///
+/// Use this function after calling Wifi_MultiplayerHostMode(),
+/// Wifi_MultiplayerClientMode() or Wifi_InternetMode() to verify that the
+/// library is ready.
+///
+/// @return
+///     It returns true if the mode change has finished, false otherwise.
+bool Wifi_LibraryModeReady(void);
+
+/// Allows the DS to enter or leave a "promsicuous" mode.
+///
+/// In this mode all data that can be received is forwarded to the ARM9 for user
+/// processing. Best used with Wifi_RawSetPacketHandler, to allow user code to
+/// use the data (well, the lib won't use 'em, so they're just wasting CPU
+/// otherwise.)
+///
+/// @param enable
+///     0 to disable promiscuous mode, nonzero to engage.
+void Wifi_SetPromiscuousMode(int enable);
+
+/// Sets the WiFI hardware in "active" mode.
+///
+/// The hardware is powered on, but not associated or doing anything useful. It
+/// can still receive and transmit packets.
+void Wifi_IdleMode(void);
+
+/// If the WiFi system is not connected or connecting to an access point,
+/// instruct the chipset to change channel.
+///
+/// The WiFi system must be in "active" mode for this to work as expected. If it
+/// is in scanning mode, it will change channel automatically every second or
+/// so.
+///
+/// @param channel
+///     The channel to change to, in the range of 1-13.
+void Wifi_SetChannel(int channel);
+
+/// Retrieve an arbitrary or misc. piece of data from the WiFi hardware.
+///
+/// See the WIFIGETDATA enum.
+///
+/// @param datatype
+///     Element from the WIFIGETDATA enum specifing what kind of data to get.
+/// @param bufferlen
+///     Length of the buffer to copy data to (not always used)
+/// @param buffer
+///     Buffer to copy element data to (not always used)
+///
+/// @return
+///     -1 for failure, the number of bytes written to the buffer, or the value
+///     requested if the buffer isn't used.
+int Wifi_GetData(int datatype, int bufferlen, unsigned char *buffer);
+
+/// Retreive an element of the WiFi statistics gathered
+///
+/// @param statnum
+///     Element from the WIFI_STATS enum, indicating what statistic to return.
+///
+/// @return
+///     The requested stat, or 0 for failure.
+u32 Wifi_GetStats(int statnum);
+
+/// @}
+/// @defgroup dswifi9_ap Scan and connect to access points.
+/// @{
+
+/// Error codes for Wifi_GetAPData()
+enum WIFI_RETURN
+{
+    /// Everything went ok
+    WIFI_RETURN_OK = 0,
+    /// The spinlock attempt failed (it wasn't retried cause that could lock
+    /// both cpus- retry again after a delay.
+    WIFI_RETURN_LOCKFAILED = 1,
+    /// There was an error in attempting to complete the requested task.
+    WIFI_RETURN_ERROR = 2,
+    /// There was an error in the parameters passed to the function.
+    WIFI_RETURN_PARAMERROR = 3,
+};
+
+/// Returned by Wifi_AssocStatus() after calling Wifi_ConnectAP()
+enum WIFI_ASSOCSTATUS
+{
+    /// Not *trying* to connect
+    ASSOCSTATUS_DISCONNECTED,
+    /// Data given does not completely specify an AP, looking for AP that matches
+    /// the data.
+    ASSOCSTATUS_SEARCHING,
+    /// Connecting...
+    ASSOCSTATUS_AUTHENTICATING,
+    /// Connecting...
+    ASSOCSTATUS_ASSOCIATING,
+    /// Connected to AP, but getting IP data from DHCP. This will finish when we
+    /// have an IPv4 or IPv6 address, it doesn't wait for both to be available.
+    /// Normally the IPv4 address is available first. Use Wifi_GetIPv6() to
+    /// verify if you have an IPv6 address or not.
+    ASSOCSTATUS_ACQUIRINGDHCP,
+    /// Connected! (COMPLETE if Wifi_ConnectAP was called to start)
+    ASSOCSTATUS_ASSOCIATED,
+    /// Error in connecting... (COMPLETE if Wifi_ConnectAP was called to start)
+    ASSOCSTATUS_CANNOTCONNECT,
+};
+
+extern const char *ASSOCSTATUS_STRINGS[];
+
+/// Makes the ARM7 go into scan mode, filterint out the requested device types.
+///
+/// The ARM7 periodically rotates through the channels to pick up and record
+/// information from beacons given off by APs.
+///
+/// @param flags
+///     Types of devices to include to the list of scanned devices.
+void Wifi_ScanModeFilter(Wifi_APScanFlags flags);
+
+/// Makes the ARM7 go into scan mode and list Internet APs.
+///
+/// The ARM7 periodically rotates through the channels to pick up and record
+/// information from beacons given off by APs.
+///
+/// When in DSWIFI_INTERNET mode, this function will scan looking for Internet
+/// APs. It will list all detecetd APs, whether they are compatible with a DS or
+/// not (because of using WPA, for example). However, NDS devices acting as
+/// hosts are excluded.
+///
+/// When in DSWIFI_MULTIPLAYER_CLIENT, this function will scan looking for other
+/// NDS consoles acting as multiplayer hosts. It will filter out all devices
+/// that aren't NDS devices acting as multiplayer hosts (only devices that
+/// include Nintendo vendor information in their beacon packets are added to the
+/// list).
+void Wifi_ScanMode(void);
+
+/// Returns the current number of APs that are known and tracked internally.
+///
+/// @return
+///     The number of APs.
+int Wifi_GetNumAP(void);
+
+/// Grabs data from internal structures for user code (always succeeds).
+///
+/// @param apnum
+///     The 0-based index of the access point record to fetch.
+/// @param apdata
+///     Pointer to the location to store the retrieved data.
+///
+/// @return
+///     WIFI_RETURN enumeration value.
+int Wifi_GetAPData(int apnum, Wifi_AccessPoint *apdata);
+
+/// Read the current radio access point, not a saved preference. False when
+/// disconnected/scanning. The AP can be associating or already connected.
+bool Wifi_GetCurrentAP(Wifi_AccessPoint *apdata);
+
+/// True only with a usable IPv4 address and, in DHCP mode, an actual lease.
+bool Wifi_IsIPReady(void);
+
+/// Determines whether various APs exist in the local area.
+///
+/// You provide a list of APs, and it will return the index of the first one in
+/// the list that can be found in the internal list of APs that have been found
+/// by the console.
+///
+/// The APs in the "apdata" list must contain a BSSID or SSID. If neither are
+/// provided, the AP will be ignored.
+///
+/// @param numaps
+///     Number of records in the list.
+/// @param apdata
+///     Pointer to an array of structures with information about the APs to
+///     find.
+/// @param match_dest
+///     OPTIONAL pointer to a record to receive the matching AP record.
+///
+/// @return
+///     -1 for none found, or a positive/zero integer index into the array
+int Wifi_FindMatchingAP(int numaps, Wifi_AccessPoint *apdata, Wifi_AccessPoint *match_dest);
+
+/// Connect to an Access Point.
+///
+/// @param apdata
+///     Basic data about the AP. The user must fill either the bssid field or
+///     the ssid and ssid_len fields. Other fields are ignored.
+/// @param wepmode
+///     Indicates whether WEP is used, and what kind (WEPMODES). Use
+///     WEPMODE_NONE if WEP isn't required.
+/// @param wepkeyid
+///     Indicates which WEP key ID to use for transmitting (Unused, set it to 0).
+/// @param wepkey
+///     The WEP key, to be used in all 4 key slots. For WEPMODE_40BIT it is a 5
+///     byte long array. For WEPMODE_128BIT it is a 13 byte long array.
+///
+/// @deprecated
+///     This function only works with open and WEP networks. Use function
+///     Wifi_ConnectSecureAP() instead, which works with all the supported types
+///     of Access Point.
+///
+/// @return
+///     0 for ok, -1 for error with input data.
+__attribute__((deprecated))
+int Wifi_ConnectAP(Wifi_AccessPoint *apdata, int wepmode, int wepkeyid, unsigned char *wepkey);
+
+/// Connect to an Access Point.
+///
+/// That this function forces you to specify the password manually. If the AP
+/// is configured in the WFC settings the library will ignore the saved data
+/// and it will use the information passed to this function. If you want to use
+/// the saved WFC settings you have to use Wifi_ConnectWfcAP().
+///
+/// @param apdata
+///     Basic data about the AP. The user must fill either the bssid field or
+///     the ssid and ssid_len fields. Other fields are ignored.
+/// @param key
+///     The key to be used. For WEP networks it must be 5, 13 or 16 bytes long.
+///     For WPA networks it must be at most 64 bytes long. For open networks use
+///     NULL.
+/// @param key_len
+///     The size of the key in bytes. For open networks use 0.
+///
+/// @return
+///     0 for ok, -1 for error with input data.
+int Wifi_ConnectSecureAP(Wifi_AccessPoint *apdata, const void *key, size_t key_len);
+
+/// Connect to an AP that has been configured in the WFC settings.
+///
+/// This is useful if multiple APs have been configured but you want to let the
+/// user select which AP to connect to. It can also be useful if you want to
+/// prioritize APs with better security settings, like connecting to WPA2 APs
+/// instead of open ones. Wifi_AutoConnect() would make the library connect to
+/// the first known AP it finds regardless of the security settings.
+///
+/// Note that this function doesn't let you specify the password manually. If
+/// the AP isn't configured in the WFC settings the library will enter "cannot
+/// connect" state. If you want to use a password other than the WFC settings,
+/// use Wifi_ConnectSecureAP().
+///
+/// @param apdata
+///     Basic data about the AP. The user must fill either the ssid and ssid_len
+///     fields. Other fields are ignored.
+///
+/// @return
+///     0 for ok, -1 for error with input data.
+int Wifi_ConnectWfcAP(Wifi_AccessPoint *apdata);
+
+/// Connect to an AP without encryption (and NDS multiplayer hosts).
+///
+/// @param apdata
+///     Basic data about the AP. The user must fill either the bssid field or
+///     the ssid and ssid_len fields. Other fields are ignored.
+///
+/// @return
+///     0 for ok, -1 for error with input data.
+int Wifi_ConnectOpenAP(Wifi_AccessPoint *apdata);
+
+/// Connect to an Access Point specified by the WFC data in the firmware.
+void Wifi_AutoConnect(void);
+
+/// Returns information about the status of connection to an AP.
+///
+/// Continue polling this function until you receive ASSOCSTATUS_ASSOCIATED or
+/// ASSOCSTATUS_CANNOTCONNECT.
+///
+/// @return
+///     A value from the WIFI_ASSOCSTATUS enum.
+int Wifi_AssocStatus(void);
+
+/// Disassociate from the Access Point
+///
+/// @return
+///     It returns 0 on success.
+int Wifi_DisconnectAP(void);
+
+/// @}
+/// @defgroup dswifi9_mp Local multiplayer utilities.
+/// @{
+
+/// Sets the WiFI hardware in mulitplayer host mode.
+///
+/// While in host mode, call Wifi_BeaconStart() to start announcing that this DS
+/// is acting as an access point. This will allow other consoles to connect
+/// discover it and connect to it.
+///
+/// Use Wifi_LibraryModeReady() to check when the mode change is finished.
+///
+/// The sizes used in this function are only the size of the custom data sent
+/// by the application. The size of the headers is added internally by the
+/// library.
+///
+/// @param max_clients
+///     Maximum number of allowed clients connected to the console. The minimum
+///     is 1, the maximum is 15.
+/// @param host_packet_size
+///     Size of the user data sent in packets from the host to the client.
+/// @param client_packet_size
+///     Size of the user data sent in packets from the client to the host.
+///
+/// @return
+///     Returns 0 on success, -1 if the requested size is too big.
+int Wifi_MultiplayerHostMode(int max_clients, size_t host_packet_size,
+                             size_t client_packet_size);
+
+/// Sets the WiFI hardware in mulitplayer client mode.
+///
+/// Use Wifi_LibraryModeReady() to check when the mode change is finished.
+///
+/// The size used in this function is only the size of the custom data sent
+/// by the application. The size of the headers is added internally by the
+/// library.
+///
+/// @param client_packet_size
+///     Size of the user data sent in packets from the client to the host.
+///
+/// @return
+///     Returns 0 on success, -1 if the requested size is too big.
+int Wifi_MultiplayerClientMode(size_t client_packet_size);
+
+/// Allows or disallows new clients to connect to this console acting as host.
+///
+/// By default, clients can connect to the host when in host mode. You should
+/// disable new connections once you have enough players connected to you, and
+/// you aren't expecting new connections.
+///
+/// Disabling new connections will kick all clients that are in the process of
+/// associating to this host but haven't finished the process.
+///
+/// @note
+///     Give the ARM7 a frame or two for this call to have effect.
+///
+/// @param allow
+///     If true, allow new connections. If false, reject them.
+void Wifi_MultiplayerAllowNewClients(bool allow);
+
+/// Set the name and name length fields in beacon packets.
+///
+/// This information can be obtained from clients from the "name" and "name_len"
+/// fields of the "nintendo" struct in a Wifi_AccessPoint. DSWifi doesn't use
+/// this information in any way, so you are free to store any information you
+/// want here. Normally, a client would use this field to display the name of
+/// each DS that is in multiplayer host mode.
+///
+/// If you use this function to overwrite the default values of DSWifi, you need
+/// to do it before calling Wifi_BeaconStart().
+///
+/// This function will copy exactly DSWIFI_BEACON_NAME_SIZE bytes from "buffer".
+/// By default, DSWifi uses the player name stored in the DS firmware, so the
+/// format is UTF-16LE.
+///
+/// The "len" argument is copied directly to the beacon information, it isn't
+/// used by this function to determine how much data to copy.
+///
+/// @param buffer
+///     Source buffer to be copied to the "name" field of the beacon packet. It
+///     must be DSWIFI_BEACON_NAME_SIZE bytes in size.
+/// @param len
+///     Value to be copied to the "name_len" field of the beacon packet.
+void Wifi_MultiplayerHostName(const void *buffer, u8 len);
+
+/// Sends a beacon frame to the ARM7 to be used in multiplayer host mode.
+///
+/// This beacon frame announces that this console is acting as an access point
+/// (for example, to act as a host of a multiplayer group). Beacon frames are
+/// be sent periodically by the hardware, you only need to call this function
+/// once. If you call Wifi_SetChannel(), the beacon will start announcing the
+/// presence of the AP in the new channel.
+///
+/// Beacon packets need to be sent regularly while in AP mode. When leaving AP
+/// mode, DSWifi will stop sending them automatically.
+///
+/// @note
+///     You can call Wifi_SetChannel() and Wifi_MultiplayerAllowNewClients()
+///     before calling Wifi_BeaconStart(). The becaon will start with the
+///     pre-selected settings. You can also modify the settings if you wait for
+///     at least two or three frames of calling Wifi_BeaconStart().
+///
+/// @param ssid
+///     SSID to use for the access point.
+/// @param game_id
+///     A 32-bit game ID included in beacon frames. It is used to identify which
+///     access points belong to Nintendo DS devices acting as multiplayer hosts
+///     of a game. Official games use IDs of the form 0x0040yyyy (except for
+///     Nintendo Zone: 0x00000857).
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_BeaconStart(const char *ssid, u32 game_id);
+
+/// Get the number of clients connected to this DS acting as a multiplayer host.
+///
+/// Clients are considered connected when they are authenticated and associated.
+///
+/// This function must be used while in multiplayer host mode.
+///
+/// @return
+///     The number of clients connected to this console acting as a host.
+int Wifi_MultiplayerGetNumClients(void);
+
+/// Returns a mask where each bit represents an connected client.
+///
+/// Bit 0 is always set to 1 as it represents the host. Bits 1 to 15 represent
+/// all possible clients.
+///
+/// The bits are set to 1 when the client is authenticated and associated.
+///
+/// This function must be used while in multiplayer host mode.
+///
+/// @return
+///     The mask of players connected to this console acting as a host.
+u16 Wifi_MultiplayerGetClientMask(void);
+
+/// Get information of clients connected to a multiplayer host.
+///
+/// This function must be used while in multiplayer host mode.
+///
+/// This function expects you to pass an empty array of clients in client_data
+/// with a length of max_clients. It will check the current list of clients
+/// connected to this host and save them to the array, up to max_clients. It
+/// returns the actual number of clients saved to the struct.
+///
+/// @param max_clients
+///     Maximum number of clients that can be stored in client_data.
+/// @param client_data
+///     Pointer to an array type Wifi_ConnectedClient that has a length of at
+///     least max_clients.
+///
+/// @return
+///     It returns the actual number of clients connected (up to a maximum of
+///     max_clients). On error, it returns a negative number.
+int Wifi_MultiplayerGetClients(int max_clients, Wifi_ConnectedClient *client_data);
+
+/// Kick the client with the provided AID from the host.
+///
+/// @param association_id
+///     The AID of the client to kick.
+void Wifi_MultiplayerKickClientByAID(int association_id);
+
+/// Possible types of packets received by multiplayer handlers
+typedef enum {
+    WIFI_MPTYPE_INVALID = -1, ///< Invalid packet type
+    WIFI_MPTYPE_CMD     = 0, ///< Multiplayer CMD packet
+    WIFI_MPTYPE_REPLY   = 1, ///< Multiplayer REPLY packet
+    WIFI_MPTYPE_DATA    = 2, ///< Regular data packet
+} Wifi_MPPacketType;
+
+/// Handler of WiFI packets received on a client from the host.
+///
+/// The first argument is the packet type.
+///
+/// The second argument is the packet address. It is only valid while the called
+/// function is executing. The third argument is the packet length.
+///
+/// Call Wifi_RxRawReadPacket(address, length, buffer) while in the packet
+/// handler function to retreive the data to a local buffer.
+///
+/// Only user data of packets can be read from this handler, not the IEEE 802.11
+/// header.
+///
+/// @warning
+///     This handler is run from inside an interrupt handler, which means that
+///     it isn't possible to use TLS (thread-local storage). If you use any libc
+///     function that requires locking (such as printf() or malloc()), this
+///     function will misbehave. In debug builds of libnds, it will crash with
+///     an error message.
+typedef void (*WifiFromHostPacketHandler)(Wifi_MPPacketType, int, int);
+
+/// Handler of WiFI packets received on the host from a client.
+///
+/// The first argument is the packet type.
+///
+/// The second argument is the association ID of the client that sent this
+/// packet. The third argument is the packet address. It is only valid while
+/// the called function is executing. The fourth argument is packet length.
+///
+/// Call Wifi_RxRawReadPacket(address, length, buffer) while in the packet
+/// handler function to retreive the data to a local buffer.
+///
+/// Only user data of packets can be read from this handler, not the IEEE 802.11
+/// header.
+///
+/// @warning
+///     This handler is run from inside an interrupt handler, which means that
+///     it isn't possible to use TLS (thread-local storage). If you use any libc
+///     function that requires locking (such as printf() or malloc()), this
+///     function will misbehave. In debug builds of libnds, it will crash with
+///     an error message.
+typedef void (*WifiFromClientPacketHandler)(Wifi_MPPacketType, int, int, int);
+
+/// Sends a multiplayer host frame.
+///
+/// This frame will be sent to all clients, and clients will reply automatically
+/// if they have prepared any reply frame.
+///
+/// Clients can use Wifi_MultiplayerFromHostSetPacketHandler() to register a
+/// packet handler for packets sent with Wifi_MultiplayerHostCmdTxFrame(). They
+/// will be received with type WIFI_MPTYPE_CMD.
+///
+/// @param data_src
+///     Pointer to the data to be sent.
+/// @param data_size
+///     Size of the data in bytes. It can go up to the size defined when calling
+///     Wifi_MultiplayerHostMode().
+///
+/// @return
+///     On success it returns 0, else it returns a negative value.
+int Wifi_MultiplayerHostCmdTxFrame(const void *data_src, size_t data_size);
+
+/// Prepares a multiplayer client reply frame to be sent.
+///
+/// This frame will be sent to the host as soon as a CMD frame is received.
+///
+/// Hosts can use Wifi_MultiplayerFromClientSetPacketHandler() to register a
+/// packet handler for packets sent with Wifi_MultiplayerClientReplyTxFrame().
+/// They will be received with type WIFI_MPTYPE_REPLY.
+///
+/// @note
+///     If there is a pre-existing packet that hasn't been sent to the host yet,
+///     it will be replaced by the new one.
+///
+/// @param data_src
+///     Pointer to the data to be sent.
+/// @param data_size
+///     Size of the data in bytes. It can go up to the size defined when calling
+///     Wifi_MultiplayerHostMode() and Wifi_MultiplayerClientMode().
+///
+/// @return
+///     On success it returns 0, else it returns a negative value.
+int Wifi_MultiplayerClientReplyTxFrame(const void *data_src, size_t data_size);
+
+/// Set a handler on a client console for packets received from the host.
+///
+/// @param func
+///     Pointer to packet handler (see WifiFromHostPacketHandler for info).
+void Wifi_MultiplayerFromHostSetPacketHandler(WifiFromHostPacketHandler func);
+
+/// Set a handler on a host console for packets received from clients.
+///
+/// @param func
+///     Pointer to packet handler (see WifiFromClientPacketHandler for info).
+void Wifi_MultiplayerFromClientSetPacketHandler(WifiFromClientPacketHandler func);
+
+/// Sends a data frame to the client with the specified association ID.
+///
+/// This function sends an arbitrary data packet that doesn't trigger any
+/// response.
+///
+/// Clients can use Wifi_MultiplayerFromHostSetPacketHandler() to register a
+/// packet handler for packets sent with Wifi_MultiplayerHostToClientDataTxFrame().
+/// They will be received with type WIFI_MPTYPE_DATA.
+///
+/// @param aid
+///     Association ID of the client that will receive the packet.
+/// @param data_src
+///     Pointer to the data to be sent.
+/// @param data_size
+///     Size of the data in bytes.
+///
+/// @return
+///     On success it returns 0, else it returns a negative value.
+int Wifi_MultiplayerHostToClientDataTxFrame(int aid, const void *data_src, size_t data_size);
+
+/// Sends a data frame to the host.
+///
+/// This function sends an arbitrary data packet without waiting for any packet
+/// sent by the host.
+///
+/// Hosts can use Wifi_MultiplayerFromClientSetPacketHandler() to register a
+/// packet handler for packets sent with Wifi_MultiplayerClientToHostDataTxFrame().
+/// They will be received with type WIFI_MPTYPE_DATA.
+///
+/// @param data_src
+///     Pointer to the data to be sent.
+/// @param data_size
+///     Size of the data in bytes.
+///
+/// @return
+///     On success it returns 0, else it returns a negative value.
+int Wifi_MultiplayerClientToHostDataTxFrame(const void *data_src, size_t data_size);
+
+/// @}
+/// @defgroup dswifi9_ip Utilities related to Internet access.
+/// @{
+
+/// Sets the WiFI hardware in Internet mode.
+///
+/// Use Wifi_LibraryModeReady() to check when the mode change is finished.
+void Wifi_InternetMode(void);
+
+/// It returns the current IP address of the DS.
+///
+/// The IP may not be valid before connecting to an AP, or setting the IP
+/// manually.
+///
+/// @return
+///     The current IP address of the DS or INADDR_NONE on error.
+u32 Wifi_GetIP(void);
+
+/// It returns an array of 4 u32 values with the current IPv6 address of the DS.
+///
+/// The IP may not be valid before connecting to an AP.
+///
+/// @param
+///     addr The struct to be filled with the IPv6 address.
+///
+/// @return
+///     If there is a valid IPv6 address it returns true. Otherwise, false.
+bool Wifi_GetIPv6(struct in6_addr *addr);
+
+/// Returns IP information.
+///
+/// The values may not be valid before connecting to an AP, or setting the IP
+/// manually.
+///
+/// @param pGateway
+///     Pointer to receive the currently configured gateway IP.
+/// @param pSnmask
+///     Pointer to receive the currently configured subnet mask.
+/// @param pDns1
+///     Pointer to receive the currently configured primary DNS server IP.
+/// @param pDns2
+///     Pointer to receive the currently configured secondary DNS server IP.
+///
+/// @return
+///     The current IP address of the DS
+struct in_addr Wifi_GetIPInfo(struct in_addr *pGateway, struct in_addr *pSnmask,
+                              struct in_addr *pDns1, struct in_addr *pDns2);
+
+/// Set the DS's IP address and other IP configuration information.
+///
+/// @param IPaddr
+///     The new IP address. If this value is zero, the IP, the gateway, and the
+///     subnet mask will be allocated via DHCP.
+/// @param gateway
+///     The new gateway (example: 192.168.1.1 is 0xC0A80101)
+/// @param subnetmask
+///     The new subnet mask (example: 255.255.255.0 is 0xFFFFFF00)
+/// @param dns1
+///     The new primary dns server (NOTE! if this value is zero AND the IPaddr
+///     value is zero, dns1 and dns2 will be allocated via DHCP).
+/// @param dns2
+///     The new secondary dns server
+void Wifi_SetIP(u32 IPaddr, u32 gateway, u32 subnetmask, u32 dns1, u32 dns2);
+
+/// @}
+/// @defgroup dswifi9_raw_tx_rx Raw transfer/reception of packets.
+/// @{
+
+/// Handler of RAW packets received in this console.
+///
+/// The first parameter is the packet address. It is only valid while the called
+/// function is executing. The second parameter is packet length.
+///
+/// Call Wifi_RxRawReadPacket(address, length, buffer) while in the packet
+/// handler function to retreive the data to a local buffer.
+///
+/// From this handler The IEEE 802.11 header can be read, followed by the packet
+/// data.
+///
+/// @warning
+///     This handler is run from inside an interrupt handler, which means that
+///     it isn't possible to use TLS (thread-local storage). If you use any libc
+///     function that requires locking (such as printf() or malloc()), this
+///     function will misbehave. In debug builds of libnds, it will crash with
+///     an error message.
+typedef void (*WifiPacketHandler)(int, int);
+
+/// Send a raw 802.11 frame at a specified rate.
+///
+/// @warning
+///     This function doesn't include the IEEE 802.11 frame header to your data,
+///     you need to make sure that your data is prefixed by a valid header
+///     before calling this function.
+///
+/// @param data_size
+///     The length in bytes of the frame to send from beginning of 802.11 header
+///     to end, but not including CRC.
+/// @param rate
+///     The rate to transmit at (WIFI_TRANSFER_RATE_1MBPS or
+///     WIFI_TRANSFER_RATE_2MBPS).
+/// @param data_src
+///     Pointer to the data to send (should be halfword-aligned).
+///
+/// @return
+///     0 on success (not enough space in queue), -1 on error.
+int Wifi_RawTxFrame(size_t data_size, u16 rate, const void *data_src);
+
+/// Set a handler to process all raw incoming packets.
+///
+/// @param wphfunc
+///     Pointer to packet handler (see WifiPacketHandler for info).
+void Wifi_RawSetPacketHandler(WifiPacketHandler wphfunc);
+
+/// Allows user code to read a packet from inside a WifiPacketHandler function.
+///
+/// You can also get a pointer to the data with Wifi_RxRawReadPacketPointer().
+/// It's a pointer to uncached RAM, so using that function may not be as fast as
+/// copying the packet information to the stack with Wifi_RxRawReadPacket().
+///
+/// @param address
+///     The base address of the packet in the internal buffer.
+/// @param size
+///     Number of bytes to read.
+/// @param dst
+///     Location for the data to be read into.
+void Wifi_RxRawReadPacket(u32 address, u32 size, void *dst);
+
+/// Returns a pointer to read a packet from inside a WifiPacketHandler function.
+///
+/// The returned pointer points to uncached RAM. Reading from this pointer can
+/// be slower than using Wifi_RxRawReadPacket() to copy the packet to a buffer
+/// in the stack, for example.
+///
+/// @warning
+///     Don't convert this uncached pointer to a cached pointer. DSWiFi assumes
+///     that the buffer never requires cache management. Accessing this memory
+///     from a cached mirror can cause corruption when the cached data is
+///     written back to RAM without DSWiFi knowing about it.
+///
+/// @param address
+///     The base address of the packet in the internal buffer.
+///
+/// @return
+///     It returns a pointer that can be used to access the data.
+const void *Wifi_RxRawReadPacketPointer(u32 address);
+
+/// @}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // DSWIFI9_H

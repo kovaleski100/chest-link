@@ -1,0 +1,18 @@
+Sprites locais da aba Journey, derivados de imagens de FireRed/LeafGreen.
+Fonte: Bulbagarden Archives (https://archives.bulbagarden.net/).
+Os nomes de arquivo abaixo podem ser abertos por Special:Redirect/file/<nome>.
+
+Insígnias FRLG: FRLG_Boulder_Badge.png, FRLG_Cascade_Badge.png,
+FRLG_Thunder_Badge.png, FRLG_Rainbow_Badge.png, FRLG_Soul_Badge.png,
+FRLG_Marsh_Badge.png, FRLG_Volcano_Badge.png, FRLG_Earth_Badge.png.
+Itens da bolsa: Bag_Ruby_Sprite.png, Bag_Sapphire_Sprite.png,
+Bag_Rainbow_Pass_Sprite.png.
+Retratos de personagens: Spr_FRLG_Oak.png, Spr_FRLG_Daisy_Oak.png,
+Spr_FRLG_Brock.png, Spr_FRLG_Misty.png, Spr_FRLG_Lt_Surge.png,
+Spr_FRLG_Erika.png, Spr_FRLG_Koga.png, Spr_FRLG_Sabrina.png,
+Spr_FRLG_Blaine.png, Spr_FRLG_Lorelei.png, Spr_FRLG_Bruno.png,
+Spr_FRLG_Agatha.png, Spr_FRLG_Lance.png, Spr_FRLG_Bill.png,
+Spr_FRLG_Mr_Fuji.png, Spr_FRLG_Giovanni.png,
+Spr_FRLG_Team_Rocket_Grunt_M.png.
+Lostelle: Lostelle_OD.png.
+Trainer Tower: Trainer_Tower_Single_8F_FRLG.png.

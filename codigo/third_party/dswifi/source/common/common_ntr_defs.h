@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (C) 2025 Antonio Niño Díaz
+
+#ifndef DSWIFI_COMMON_NTR_DEFS_H__
+#define DSWIFI_COMMON_NTR_DEFS_H__
+
+#include <assert.h>
+
+#include <nds/ndstypes.h>
+
+// Hardware TX Header (12 bytes)
+// =============================
+
+#define HDR_TX_STATUS           0x0
+#define HDR_TX_CLIENT_BITS      0x2
+#define HDR_TX_UNKNOWN_04       0x4
+#define HDR_TX_UNKNOWN_05       0x5
+#define HDR_TX_UNKNOWN_06       0x6
+#define HDR_TX_TRANSFER_RATE    0x8 // 0x0A = 1Mbit/s, 0x14 = 2Mbit/s
+#define HDR_TX_UNKNOWN_09       0x9
+#define HDR_TX_IEEE_FRAME_SIZE  0xA // Header + body + checksum(s) in bytes
+
+#define HDR_TX_SIZE             0xC
+
+typedef struct WIFI_TXHEADER {
+    u16 enable_flags;
+    u16 client_bits;
+    u16 countup;
+    u16 beaconfreq;
+    u16 tx_rate;
+    u16 tx_length; // Full IEEE frame size (including checksums) in bytes
+} Wifi_TxHeader;
+
+static_assert(sizeof(Wifi_TxHeader) == 12);
+
+// Hardware RX Header (12 bytes)
+// =============================
+
+#define HDR_RX_FLAGS            0x0
+#define HDR_RX_UNKNOWN_02       0x2
+#define HDR_RX_UNKNOWN_04       0x4
+#define HDR_RX_TRANSFER_RATE    0x6
+#define HDR_RX_IEEE_FRAME_SIZE  0x8 // Header + body (excluding checksum) in bytes
+#define HDR_RX_MAX_RSSI         0xA
+#define HDR_RX_MIN_RSSI         0xB
+
+#define HDR_RX_SIZE             0xC
+
+typedef struct WIFI_RXHEADER {
+    u16 a;
+    u16 b;
+    u16 c;
+    u16 d;
+    u16 byteLength;
+    u16 rssi_;
+} Wifi_RxHeader;
+
+static_assert(sizeof(Wifi_RxHeader) == 12);
+
+// MAC RAM memory map
+// ==================
+//
+// Base address: 0x4000
+// Size:         0x2000 bytes (8 KB)
+//
+//     Offsets     |    Addresses    | Size | Notes
+// ================+=================+======+=======================
+// 0x0000 - 0x08BF | 0x4000 - 0x48BF | 2240 | TX buffer: Not a circular buffer
+// 0x08C0 - 0x09FF | 0x48C0 - 0x49FF |  320 | Multiplayer CMD frame buffer
+// ----------------+-----------------+------+-----------------------
+// 0x0A00 - 0x0AFF | 0x4A00 - 0x4AFF |  256 | Client frame (buffer 1) / Beacon frame
+// 0x0B00 - 0x0BFF | 0x4B00 - 0x4BFF |  256 | Client frame (buffer 2) / Beacon frame
+// ----------------+-----------------+------+-----------------------
+// 0x0C00 - 0x1F5F | 0x4C00 - 0x5F5F | 4960 | RX buffer: Circular buffer
+// ----------------+-----------------+------+-----------------------
+// 0x1F60 - 0x1FFF | 0x5F60 - 0x5FFF |  160 | Internal use (WEP keys, etc)
+
+#define MAC_BASE_ADDRESS            0x4000
+#define MAC_SIZE                    0x2000
+
+// Definitions used in all modes
+
+#define MAC_TXBUF_START_OFFSET      0x0000
+#define MAC_TXBUF_END_OFFSET        0x08C0
+
+#define MAC_TXBUF_START_ADDRESS     (MAC_BASE_ADDRESS + MAC_TXBUF_START_OFFSET)
+#define MAC_TXBUF_END_ADDRESS       (MAC_BASE_ADDRESS + MAC_TXBUF_END_OFFSET)
+
+// Buffer used for multiplayer CMD frames. It can't be shared with any other
+// kind of frame. When a CMD frame fails to be sent, Wifi_Intr_MultiplayCmdDone
+// rebuilds it in this buffer from an interrupt handler, which overwrites the
+// two halfwords right after the MAC header. In a CMD frame those are the
+// client time and client bits fields, but in any other frame they are user
+// data.
+#define MAC_CMDBUF_START_OFFSET     0x08C0
+#define MAC_CMDBUF_END_OFFSET       0x0A00
+#define MAC_CMDBUF_SIZE             (MAC_CMDBUF_END_OFFSET - MAC_CMDBUF_START_OFFSET)
+
+// Definitions used in multiplayer client mode
+
+#define MAC_CLIENT_RX1_START_OFFSET 0x0A00 // 256 bytes
+#define MAC_CLIENT_RX1_END_OFFSET   0x0B00
+
+#define MAC_CLIENT_RX2_START_OFFSET 0x0B00 // 256 bytes
+#define MAC_CLIENT_RX2_END_OFFSET   0x0C00
+
+#define MAC_CLIENT_RX_SIZE  (MAC_CLIENT_RX1_END_OFFSET - MAC_CLIENT_RX1_START_OFFSET)
+
+// Definitions used in multiplayer host mode
+
+#define MAC_BEACON_START_OFFSET     0x0A00 // 512 bytes
+#define MAC_BEACON_END_OFFSET       0x0C00
+#define MAC_BEACON_SIZE             (MAC_BEACON_END_OFFSET - MAC_BEACON_START_OFFSET)
+
+// Definitions used in all modes
+
+#define MAC_RXBUF_START_OFFSET      0x0C00
+#define MAC_RXBUF_END_OFFSET        0x1F60
+
+#define MAC_RXBUF_START_ADDRESS     (MAC_BASE_ADDRESS + MAC_RXBUF_START_OFFSET)
+#define MAC_RXBUF_END_ADDRESS       (MAC_BASE_ADDRESS + MAC_RXBUF_END_OFFSET)
+
+// Types of packets that can be received by the DS
+// ===============================================
+
+#define WFLAG_PACKET_DATA           0x0001
+#define WFLAG_PACKET_MGT            0x0002
+#define WFLAG_PACKET_BEACON         0x0004
+#define WFLAG_PACKET_CTRL           0x0008
+
+#define WFLAG_PACKET_ALL            0xFFFF
+
+// Flags used by the ARM9 to tell the ARM7 how to send packets
+// ===========================================================
+
+// We write them in the 32 bits where we store the packet size.
+#define WFLAG_SEND_AS_DATA      0x10000000
+#define WFLAG_SEND_AS_BEACON    0x20000000
+#define WFLAG_SEND_AS_REPLY     0x40000000
+#define WFLAG_SEND_AS_CMD       0x80000000
+
+#define WFLAG_SEND_TYPE_MASK    0xF0000000
+#define WFLAG_SEND_SIZE_MASK    0x0FFFFFFF
+
+#endif // DSWIFI_COMMON_NTR_DEFS_H__
