@@ -1,14 +1,22 @@
-# Chest Link 0.4.28
+# Chest Link 0.5.14
 
 Chest Link is a homebrew tool for copying selected Pokémon or entire boxes between Pokémon Chest storage on DS/DSi and PKSM storage on 3DS. It includes a Nintendo DS app, a 3DS Homebrew Launcher app, and a PC mailbox with a browser interface.
 
-**[Download Chest Link 0.4.28](https://github.com/kovaleski100/chest-link/releases/tag/v0.4.28)** · [Browse the source code](https://github.com/kovaleski100/chest-link/tree/main)
+**[Latest public download: Chest Link 0.4.28](https://github.com/kovaleski100/chest-link/releases/tag/v0.4.28)** · [Browse the source code](https://github.com/kovaleski100/chest-link/tree/main)
 
-Chest Link copies storage banks. It does not edit game save files or move Pokémon directly from an in-game party. First place the Pokémon in a Chest or PKSM bank and save it in that app.
+Chest Link 0.5.1 fixes the DS app getting stuck while searching for the PC on
+some DSWifi setups. Updates try the saved PC address first; if it does not
+respond, the app searches the network and uses the address it finds. If the
+search finds no PC or its address does not respond, it lets the user enter an
+IP; only a failed manual connection produces the server-not-found message. The
+DS connection and search waits have frame-based limits and can be canceled
+with B.
+
+Chest Link leaves original game saves unchanged. You can browse Chest/PKSM banks or read Pokémon boxes from supported `.sav` files on the console's SD/flashcard, then save selected Pokémon to a new Chest Link bank before sending them to the PC.
 
 ## Project status
 
-Console-to-PC transfers are working. Direct transfers between consoles still need validation on real hardware. PC-to-console delivery also needs validation on real hardware. The console apps compile and the PC test suite passes.
+Console-to-PC transfers are working. All six transfer directions have also passed local emulator tests with private FireRed-derived bank records. Console-to-PC was checked through the normal app interface; the other directions used isolated test builds with the normal transfer core. Direct transfers between consoles and PC-to-console delivery still need validation on real hardware.
 
 Keep your existing backups and try one box first. Chest Link creates a new bank at the destination and leaves the source bank intact.
 
@@ -18,13 +26,15 @@ Keep your existing backups and try one box first. Chest Link creates a new bank 
 
 The PC can act as a mailbox and storage box. Send a copy from either console and leave it on the PC while the other console is turned off. Later, use the browser interface to inspect the stored banks and boxes, select Pokémon, and start delivery to a DS or 3DS. The PC keeps its backup after delivery.
 
-The PC interface also includes an offline Generation I Pokédex for Red, Blue, and Yellow. It can show which species appear in verified copies stored on the PC and track progress as one combined collection or separately by game. Species pages include evolution lines and methods, encounter locations, search, and filters for types and version exclusives. Its automatic “present in a PC copy” indicator is separate from the manual caught marker.
+The PC server has one source tree in `codigo/server`. The `PC` folder contains only launchers and `dados`; the package includes the same server source once, with a small launcher in `PC`.
+
+The PC interface includes offline Pokédexes for Generations I and II: Red, Blue, and Yellow cover Kanto; Gold, Silver, and Crystal cover Johto. It can show species received in verified copies stored on the PC and track manual progress in one combined list or separately by game within each generation. The HOME grid uses the names and base sprites in the local catalogue. Regional Dex appears on the left and National Dex on the right, and both counters remain visible when their totals match. Each generation’s National comparison uses the species known by that generation; Generation I covers 151 species and Generation II covers 251. Regional totals come from the regional species lists, including Johto’s regional order. HOME uses the full catalogue for both counters. Species pages include evolution methods, encounter locations, search, and filters for types and version availability. Server-received species count separately from manual progress.
 
 ### DS / DSi
 
 The .nds app reads Pokémon Chest banks from the flashcard or SD storage available to the console. Browse boxes, select individual Pokémon or whole boxes, then send the selection to the PC or directly to another console. It can also receive copies from the PC or a 3DS into a new bank that you can open in Pokémon Chest.
 
-On DS and DS Lite, Wi-Fi requires a compatible 2.4 GHz 802.11b network that is open or uses WEP. A DSi running the app in DSi mode can use a WPA2 network configured on the console. A DSi running homebrew in DS mode has DS Wi-Fi limitations.
+On DS and DS Lite, Wi-Fi requires a compatible 2.4 GHz 802.11b network. Open and WEP connections use the NTR radio's established path. The current app also includes an experimental WPA2-Personal/AES-CCMP implementation for the NTR radio; its cryptography and packet handling pass simulated tests, but receiving WPA2 traffic on a physical DS has not yet been validated. A DSi running the app in DSi mode uses the console's native WPA2 networking. A DSi running homebrew in DS mode uses the NTR radio path.
 
 ### 3DS
 
@@ -55,7 +65,7 @@ You need an existing homebrew setup on your console. The PC mailbox requires Pyt
 
 ### Start the PC mailbox
 
-Extract the package to a permanent folder. The PC folder contains the server and launch scripts. Keep the terminal window open while a console is uploading or receiving.
+Extract the package to a permanent folder. The PC folder contains launchers and saved data; its launcher uses the server source in the sibling `codigo/server` folder. Keep the terminal window open while a console is uploading or receiving.
 
 Linux:
 
@@ -90,6 +100,27 @@ On the 3DS, choose the storage that matches PKSM's configuration:
 - Chest (SD) appears when Pokémon Chest banks are present on the SD card, for example through TWiLight Menu++.
 
 If PKSM is configured for ExtData but you receive a copy into PKSM (SD), that copy will appear in PKSM only after PKSM is configured to use SD banks. Check the bank list before transferring.
+
+## Copy Pokémon from game saves
+
+Choose **Ler saves Pokemon** to scan `.sav` files on the SD card or flashcard.
+Chest Link checks the save structure and checksums and shows only recognized
+Pokémon saves from Generations I–IV; unrelated `.sav` files are ignored. This
+reads save files stored on the card, not the live save inside a cartridge or
+console title.
+
+The lower screen shows the selected game's boxes and tabs for detected saves;
+the upper screen is the Chest Link box being assembled. Select a Pokémon and
+press A to add it to the next empty slot, or press Y to replace the draft with
+the whole selected box. Use L/R to change boxes, X or a game tab to switch
+saves, and B to return. Press START to save the draft as a new bank in the
+selected Chest/PKSM storage. Then open **Consultar bancos** to send that bank
+to the PC. The source `.sav` and existing banks remain unchanged.
+
+The DS Chest format accepts Generations III–IV for this import; Generation
+I–II saves appear when the selected destination is PKSM on the 3DS. The reader
+recognizes raw save layouts already represented by the offline Pokédex. Keep
+your original save backups before using a newly built version on hardware.
 
 ## Use a direct console transfer
 
@@ -128,7 +159,7 @@ Uploads without a selected destination stay in the PC mailbox until you explicit
 - Up to 500 boxes per bank on supported PKSM and DSi SD storage. A DS/flashcard destination is limited to 50 boxes per transfer.
 - PKSM-to-Chest transfers reject Generation I and II records for compatibility with the tested Chest reader. Unknown generations are also rejected.
 - Chest Link is a storage and transfer tool. It does not provide PKSM's editing, scripts, or other advanced features.
-- The PC Pokédex covers the 151 Generation I species. It works offline and stores progress in the PC data folder.
+- The PC HOME grid is built from the local species and sprite catalogue. Generation I includes the 151 Kanto species and Generation II includes all 251 Johto entries in regional order, with game availability, capture tracking, evolution lines, and encounter details for Red/Blue/Yellow and Gold/Silver/Crystal. Progress is kept separately for each generation in the PC data folder.
 - The real-hardware status above is limited to the console-to-PC flow. Direct console-to-console and PC-to-console transfer still need hardware validation.
 
 ## Build and local validation
@@ -142,6 +173,8 @@ make release
 ~~~
 
 The source includes host-side tests and release checks. A passing local build or test does not establish that a transfer works on real console hardware. The DS and 3DS apps must be released with the same version number.
+
+The [E2E lab guide](tests/e2e/README.md) explains isolated melonDS/Azahar tests and the private FireRed regression matrix. Set `CHESTLINK_FIRERED_SAVE` locally and run `make e2e-firered` after configuring the emulators. Real saves and test artifacts remain outside public fixtures and releases.
 
 See docs/PROTOCOLO.md and docs/FORMATOS.md for protocol and storage details. These documents are currently in Portuguese.
 

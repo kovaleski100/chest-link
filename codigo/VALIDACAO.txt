@@ -1,0 +1,301 @@
+Chest Link 0.5.2 — validação local de 2026-10-15
+
+No topo do console, `IP-server` mostra o IP anunciado pelo servidor Chest Link
+do PC. O estado passa a ser “procurando”, “conectado” ou “não encontrado”,
+usando a descoberta local UDP em vez do teste de internet pública.
+`make -C codigo console-ports-test test mailbox-test gui-test`: passou.
+`make -C codigo release`: DS e 3DS v0.5.2 compilados como par sincronizado e
+publicados localmente. Os oito arquivos em `SHA256SUMS.txt` conferem.
+Emuladores: melonDS passou com menu, faixa “Servidor: não encontrado” e box
+sintética `e2e`; Azahar passou com menu e faixa “Servidor: não encontrado”.
+Ambos estavam sem rede associada; não foi testada descoberta com servidor
+ativo. melonDS usa rede virtual e não se associou ao Wi-Fi real
+`MatheusFKovaleski`. Hardware real ainda não testado.
+Detalhes: docs/release-0.5.2.md.
+
+Registro anterior:
+
+Corrigida a busca UDP do PC no DS, que podia ficar presa indefinidamente em
+select no DSWifi. A atualização tenta o IP salvo primeiro por até 1,5 s; se
+falhar, busca o PC na rede e tenta o IP encontrado. Se a busca ou a conexão
+com esse IP falhar, permite digitar um IP manualmente e só mostra erro se essa
+conexão também falhar. A descoberta usa socket não bloqueante, limite por
+quadros (~3 s), retransmissão periódica e cancelamento por B. Regressão simula
+relógio parado e confirma limites de 180 quadros para busca e 90 para conexão
+ao IP salvo.
+`make -C codigo console-ports-test test mailbox-test gui-test`: passou.
+`make -C codigo consoles`: DS e 3DS v0.5.1 compilados como par.
+Emuladores: melonDS (no `melonAP` virtual) e Azahar exibiram a tela manual e a
+mensagem final após falha. Isso cobriu somente caminhos de fallback; não foram
+validados o IP salvo que responde, a busca com reconexão bem-sucedida após falha
+do IP salvo, nem o IP manual correto. O host estava no Wi-Fi
+`MatheusFKovaleski`, mas a rota padrão usava Ethernet; melonDS não se associou
+ao SSID real. A box sintética `e2e` permaneceu acessível no melonDS.
+Consulta autenticada ao servidor local, recusada antes do download, confirmou
+DS v0.5.1 (1.329.664 bytes).
+Hardware real: ainda não testado.
+`make -C codigo release`: passou; par DS/3DS v0.5.1 publicado localmente.
+Os oito arquivos listados em `SHA256SUMS.txt` conferem.
+Detalhes: docs/release-0.5.1.md.
+
+Registro anterior:
+Chest Link 0.5.0 — validação local de 2026-10-15
+
+`make -C codigo console-ports-test test mailbox-test gui-test`: passou.
+`make -C codigo release`: DS e 3DS 0.5.0 compilados, verificados e publicados
+localmente como par sincronizado. Builds e manifests conferidos; SHA-256
+atualizados em SHA256SUMS.txt.
+Emuladores: DS chegou ao menu principal no melonDS e 3DS chegou ao menu principal
+no Azahar. O runner expirou aguardando confirmação do menu e da box sintética em
+Consultar bancos; esta sessão não expôs controle de entrada para navegar. A box e
+as transferências não foram validadas nesta execução.
+Hardware real: a versão 0.5.0 ainda não foi testada em DS/3DS físicos.
+Detalhes: docs/release-0.5.0.md.
+
+Registro anterior:
+Chest Link 0.4.28 — validação de 2026-10-13
+
+Corrigida abertura duplicada da recepção após a limpeza da atualização.
+Regressão com código real do app reproduziu o socket abandonado antes
+da correção e passou depois. Abertura idempotente, PIN preservado,
+desconexão/retorno e falhas de socket também passaram.
+make console-ports-test test mailbox-test gui-test: passou.
+ASan/UBSan dos ports e listener: passou (detect_leaks=0).
+make release: DS e 3DS 0.4.28 compilados, verificados e publicados.
+Download real de ambos pelo TCP do servidor conferiu versão, tamanho
+e SHA-256. Nenhum banco alterado; instalação escolhida: Atualizar pelo PC.
+O usuário confirmou que a transferência console→PC funciona em hardware.
+Transferência direta entre consoles e entrega PC→console ainda precisam de
+validação em hardware. Detalhes: docs/release-0.4.28.md.
+
+Registro anterior:
+Chest Link 0.4.27 — validação de 2026-10-13
+
+Checagem Wi-Fi do 3DS corrigida: ACU_GetWifiStatus em vez de exigir
+ACU_GetStatus == 3. Teste de regressão falhou antes e passou após a mudança.
+DS e 3DS compilados/publicados com o mesmo número. Testes locais e
+ASan/UBSan dos ports passaram. Instalador FTP tem seis testes de segurança.
+Detalhes: docs/release-0.4.27.md. Confirmação no app 3DS real ainda pendente.
+
+Registro anterior:
+Chest Link 0.4.26 — validação de 2026-10-13
+
+DS e 3DS compilados com a mesma versão. Ports, publicação conjunta,
+backup do atualizador, interface e regressões locais passaram.
+Detalhes e limites: docs/release-0.4.26.md.
+Execução física do novo 3DS e transferência DS<->3DS ainda pendentes.
+
+Registro histórico abaixo, preservado:
+Chest Link 0.3 — validação de 2026-10-10
+
+Status: interface gráfica e servidor executados no Linux com HTTP/TCP reais.
+Apps nativos DS/DSi e 3DS compilados. Execução física e Windows pendentes.
+
+Comandos executados nesta atualização:
+  make test mailbox-test
+  make gui-test
+  make gui-sanitize ASAN_OPTIONS=detect_leaks=0
+  make ds
+  make 3ds
+
+Resultados:
+  26 grupos de protocolo direto, bancos e recuperação: passaram.
+  9 grupos do adaptador ExtData, com FS simulado: passaram.
+  28 testes do servidor PC e cliente C++ da caixa postal: passaram.
+  4 grupos da seleção individual, toque e renderizador nativo: passaram.
+  13 testes de HTTP/TCP da interface e leitura dos Pokémon: passaram.
+  Total normal: 80 testes/grupos, com bancos sintéticos.
+  Os 4 grupos gráficos e os 13 testes novos passaram também com ASan/UBSan
+  no código C++ de seleção, leitura e renderização. Vazamentos não verificados.
+
+Leitura e seleção:
+  434 vetores independentes de gerações I–VIII/LGPE, com dados descriptografados
+  e criptografados, incluindo todas as 24/32 ordens de blocos relevantes.
+  Resumos nativos C++ e do PC concordaram nos campos conhecidos dos vetores.
+  Espécies internas da geração III, formas e registros inválidos verificados.
+  Seleção individual preserva os 336 bytes de cada registro, incluindo padding,
+  posição do Pokémon na box, nomes das boxes e banco original.
+  Boxes sem seleção são omitidas; espaços não selecionados ficam vazios na cópia.
+  Seleções inválidas e cancelamento não alteram a origem nem publicam parciais.
+  Gerações recusadas no Chest são verificadas na seleção enviada.
+
+Interface gráfica:
+  Renderizador usado nos binários executado no host para inspeção visual.
+  Conferidos grade 6x5, sprites, cursor, seleção, menus, confirmação e IP/PIN.
+  Imagens do DS conferidas com a mesma redução de resolução dos seus binários.
+  Textos do DS ajustados à grade de pixels físicos para conservar legibilidade.
+  Todos os 30 espaços, setas de box, ações e paginação têm toque verificado.
+  Recursos locais: 898 espécies, 20 formas, ovo e marcador desconhecido.
+  Sem requisições de recursos externos na interface do navegador.
+
+Teste real no navegador Chromium 151:
+  Lista de bancos, sprites, seleção por mouse e teclado, troca de box.
+  Cancelamento de confirmação não cria envio; confirmação publica na fila.
+  Cliente C++ busca pelo TCP e recebe exatamente os registros selecionados.
+  Banco original e backup do PC conservados após entrega.
+  Marcar box/todas e limpar seleção; layout estreito sem rolagem horizontal.
+  Nenhum erro de JavaScript. Teste feito com 46 Pokémon sintéticos em duas boxes.
+
+Pacote extraído:
+  ZIP sem erros e sem arquivos de build, dados, saves ou capturas de teste.
+  Todos os hashes de instalação conferidos; headers NDS/3DSX e versão válidos.
+  Atalho Linux iniciado a partir de outro diretório e caminho com espaços.
+  Interface e recursos offline carregados do pacote entregue.
+  Upload, seleção individual, busca TCP e bytes recebidos conferidos.
+  Reinício preservou o PIN salvo, a fila pendente e o backup após entrega.
+
+Servidor e protocolo (regressão):
+  DS->PC->3DS e 3DS->PC->DS, persistência e PIN salvo, filas por destinatário.
+  ACK perdido, uploads incompletos, corrupção, PIN errado e cancelamento.
+  Falha de disco, cota cheia, entrega não registrada e recuperação após falha.
+  Deduplicação de cópias, concorrência, trava de processo, 500 boxes no PC.
+  Transferências diretas e barreiras de recuperação continuam passando.
+  API local verifica chave, Host, Origin e limites e rejeita caminhos externos.
+  Cópias corrompidas são recusadas mesmo após uma prévia consulta da interface.
+  Reenfileirar explicitamente uma cópia entregue não altera seus bytes.
+
+Ferramentas:
+  DS: BlocksDS 1.24.0 / Wonderful ARM GCC 16.2.0.
+  3DS: devkitARM GCC 16.1.0 / libctru do SDK devkitPro.
+  Host: GCC/G++, C++17, AddressSanitizer e UndefinedBehaviorSanitizer.
+  Servidor: Python 3.12.14, somente biblioteca padrão; mínimo documentado 3.9.
+
+Limites:
+  Não houve execução física no DS, DSi ou 3DS.
+  ExtData real, permissões, SD, flashcard e rádio Wi-Fi ainda não exercitados.
+  O adaptador ExtData foi testado com um FS simulado de tamanho fixo.
+  O servidor e a interface foram executados no Linux, não no Windows.
+  ASan/UBSan cobre o código C++ no host; não executa os binários ARM.
+  LeakSanitizer desativado por restrição do ambiente anterior em /proc.
+  Aviso do linker DS sobre .note.GNU-stack ausente em crtn.o vem do SDK.
+  Não são implementadas as outras funções de edição, scripts ou GPSS do PKSM.
+  Nenhum save ou Pokémon real utilizado nos testes.
+
+Artefatos compilados e componentes do PC (SHA-256):
+  ChestLink_DS.nds: 1262080 bytes; 1aba4b9e38f686cac61189ea989590cf93d70dccdd444eeb7aac394b37c3eebf
+  ChestLink_3DS.3dsx: 1259020 bytes; 4debb8bfc3f4484d33f1c9b53b5a3e43be0aee6943408014feb14eac42eccacc
+  ChestLink_3DS.smdh: 14016 bytes; 5cab971824757fe9beb564ba4e9cf9e58bdc726b19dc5a390b7b07569430363c
+  chest_link_server.py: 23302 bytes; 9eaf8d1b1abe8278975afbb816145f336b77f81a92cd3450d66e05a871678316
+  interface.py: 11857 bytes; 12becfc64ec1e1794a2e96b2c548b810cc9271ef6b6290fb691dbc562746726b
+  pokemon.py: 4836 bytes; d38ed5ee159424fdb2bacda025358006d17839870a41ec2bc6212c1184222bc4
+
+SHA256SUMS.txt no pacote inclui todos os recursos e arquivos de instalação.
+
+Chest Link 0.3 — recompilação ARM de 2026-10-11
+
+Ambiente:
+  DS: skylyrac/blocksds:slim-latest (BlocksDS 1.24.0, ARM GCC 16.2.0).
+  3DS: devkitpro/devkitarm:20260610 (devkitARM GCC 16.1.0, libctru).
+
+Comandos executados a partir da raiz do projeto:
+  podman run --rm -v "$(pwd)/codigo:/work" -w /work/platform/nds \
+    docker.io/skylyrac/blocksds:slim-latest make
+  podman run --rm -v "$(pwd)/codigo:/work" -w /work/platform/3ds \
+    docker.io/devkitpro/devkitarm:20260610 make
+
+Resultados:
+  make do DS gerou ChestLink_DS.nds com cabeçalho Nintendo DS/DSi enhanced.
+  make do 3DS gerou ChestLink_3DS.3dsx e ChestLink_3DS.smdh.
+  Os três artefatos foram copiados para as pastas de instalação do pacote e
+  reconhecidos como NDS, 3DSX e SMDH; hashes acima e em SHA256SUMS.txt atualizados.
+  Não houve execução física nos consoles; Wi-Fi, ExtData, SD e flashcards
+  continuam pendentes de validação em hardware.
+
+Chest Link 0.4.3 — validação desta revisão, 2026-10-11
+
+Comportamento confirmado nesta versão (esta seção substitui descrições antigas
+de recebimento automático nas notas históricas acima):
+  A interface oferece uma ação confirmada para excluir envios pendentes ao DS/3DS,
+  sem remover originais sem destino ou backups já entregues.
+  O listener direto continua ativo; o console não consulta nem puxa a caixa
+  postal. O envio ao DS/3DS começa somente por ação explícita na interface do PC.
+  Upload console→PC usa cópia sem destinatário; o PC atribui DS/3DS e valida
+  gerações somente quando o usuário inicia o encaminhamento. A cópia original
+  continua preservada. O envio direto entre consoles mantém o destino inferido.
+  Atualizar o app 3DS não pede seleção de armazenamento; IP/PIN usam localização
+  comum no SD e configurações antigas por armazenamento são lidas como fallback.
+  Consultar bancos e receber no 3DS usam automaticamente ExtData ou SD conforme
+  `useExtData` na configuração do PKSM; a escolha manual entre os dois foi removida.
+  O menu do DS agora também oferece atualização pelo PC. O DS baixa o `.nds`
+  validado por SHA-256 para uma cópia separada no dispositivo escolhido, sem
+  presumir o caminho da cópia em execução; o 3DS mantém a instalação no caminho
+  do Homebrew Launcher. O servidor publica as duas plataformas por comandos
+  autenticados distintos e valida cada manifesto antes de anunciar o app.
+
+Verificações concluídas:
+  make test: 26 grupos centrais, 9 grupos ExtData e teste de seleção automática passaram.
+  make gui-test: 4 grupos gráficos e 26 testes de interface passaram.
+  make mailbox-test: 38 testes de protocolo/servidor passaram, incluindo download,
+  cancelamento, substituição com backup e descoberta do manifesto NDS.
+  Python compilado; JavaScript validado; espelhos PC/servidor conferidos.
+  DS recompilado com BlocksDS; 3DS recompilado com devkitARM/libctru.
+  Os manifestos release.json conferem com os binários DS e 3DS. O protocolo de
+  atualização foi exercitado contra o servidor em execução para ambas as plataformas.
+  SHA256SUMS.txt e ZIP verificados.
+
+Artefatos desta revisão:
+  DS/ChestLink_DS.nds: 1261056 bytes; 743a2373d32190729a785196c19a639a8444a38f786556f18821e4e0558dd470
+  3ds/ChestLink_3DS/ChestLink_3DS.3dsx: 1257168 bytes; f399cfbc8dba0005f2b5ce6271f570157476692054d9ff0df772744ea2aba775
+  3ds/ChestLink_3DS/ChestLink_3DS.smdh: 14016 bytes; 5924f5e8f563082233b4ff21d70852ebffe710391c9529df0b6fff66c824aa4c
+
+Não houve teste físico nos consoles; Wi-Fi, ExtData real, SD e flashcards
+continuam pendentes de validação em hardware.
+Chest Link 0.3 — validação da atualização de 2026-10-11
+
+Alterações verificadas nesta atualização:
+  Menu nativo reduzido a Consultar bancos, Créditos e Sair; listener direto
+  iniciado automaticamente e confirmação exibida no console receptor.
+  Envio do PC ao listener com IP/PIN, backup mantido no PC e recepção automática
+  de filas quando o console já possui os dados do PC salvos.
+  Interface web substituída por painel responsivo independente do visual PKSM.
+  Preferências de conexão para bancos ExtData ficam no SD; gravações bancárias
+  continuam usando commits de ExtData nas transações de importação.
+
+Comandos executados:
+  python3 -m py_compile PC/*.py codigo/server/*.py codigo/tests/*.py
+  node --check PC/web/app.js codigo/server/web/app.js
+  make test gui-test mailbox-test sanitize mailbox-sanitize
+
+Resultados desta atualização:
+  26 grupos de protocolo/bancos, 9 grupos do adaptador ExtData, 4 grupos
+  gráficos, 13 testes de interface e 28 testes de caixa postal passaram.
+  ASan/UBSan passou nos testes de núcleo, ExtData e caixa postal.
+  A compilação sintática do app, rede e gráficos host passou com -Werror.
+  Os apps foram recompilados em containers oficiais em 2026-10-11; execução
+  física no DS/3DS, ExtData real, SD, flashcard e rádio Wi-Fi pendentes.
+
+Validacao v0.5.9 em 2026-10-17:
+  DS e 3DS compilados e publicados com o mesmo numero, banners e manifests.
+  Ambos os emuladores concluiram download, SHA-256 e instalacao em storage privado.
+  Caixa postal: 47 testes passaram; nucleo: 29 grupos; ExtData: 9 grupos.
+  NTR WPA2/RAM/fila/associacao/IPv4/DHCP-TCP passaram; DHCP-TCP tambem com ASan/UBSan.
+  A bateria geral mantem duas falhas anteriores: fixture Sinnoh (nome da especie 157)
+  e expectativa antiga da lista de itens do menu no teste de interface.
+  Evidencias: codigo/build/validation-0.5.9/ e codigo/docs/release-0.5.9.md.
+  Radio WPA2 do DS Lite fisico com esta correcao: ainda nao validado.
+
+
+Validacao v0.5.11 — 17/10/2026
+- DS e 3DS compilados, banners/manifests/hashes validados e publicados juntos com make -C codigo release.
+- Recepcao WPA2: corrigido consumo prematuro de replay/cache quando a fila ARM7/ARM9 esta cheia; regressao reproduzida antes da alteracao.
+- NTR WPA2 166, RAM RX simulada 506, fila 1485, DHCP/TCP real 58 verificacoes: passaram; ASan/UBSan tambem passaram.
+- Contagem de bytes atualiza abaixo de 1%; teste chama o callback real da interface.
+- Escala de imagens sem divisao por pixel: 60 casos e 20 telas completas preservam os pixels; ASan/UBSan passou.
+- MelonDS: download de 1.409.536 bytes, verificacao SHA-256 e instalacao: PASS, rede virtual aberta melonAP.
+- Azahar: download de 1.396.160 bytes, verificacao SHA-256, instalacao e backup anterior distinto preservado: PASS.
+- Tentativas anteriores desta rodada: um timeout no melonDS antes da otimizacao do renderer e uma falha de IPv4 no Azahar antes da transferencia; logs preservados.
+- Executado make -j2 -k -C codigo console-ports-test test mailbox-test gui-test. Testes de portas, protocolo, mailbox (47), GUI nativa (5 grupos) passaram.
+- Duas falhas anteriores continuam: expectativa de especie/nome no parser Sinnoh (test_native_saves) e expectativa literal de menu antigo (test_interface). Nao foram alteradas nesta correcao.
+- Servidor do PC em execucao confirmou ofertas v0.5.11 com os hashes publicados para DS e 3DS; esta verificacao foi local e recusou o download.
+- Hardware fisico: esta versao ainda NAO foi validada no DS real. Os logs antigos nao comprovam fila cheia. Nao se declara resolvido o travamento WPA2 original.
+- Evidencias: codigo/build/validation-0.5.11/summary.json; detalhes: codigo/docs/release-0.5.11.md.
+
+Validacao v0.5.12 — 17/10/2026
+- Somente a numeracao mudou; DS e 3DS publicados juntos como codigo 1292.
+- `make -C codigo release` e os oito checksums do pacote passaram.
+- melonDS e Azahar baixaram, verificaram o hash e instalaram os executaveis v0.5.12 em armazenamento privado.
+- O servidor do PC em execucao ofereceu v0.5.12 para ambos; a verificacao local autenticada recusou antes do download.
+- `console-ports-test` passou; `mailbox-test` passou (47 testes); os cinco grupos nativos de GUI passaram.
+- Permanecem duas falhas de testes ja existentes: nome esperado da especie 157 no fixture Sinnoh e assercao do antigo menu DS em `test_interface`.
+- DS fisico aceitou oferta v0.5.12 em WPA2, mas falhou no 14o bloco (1 ACK TCP pendente); a v0.5.12 nao chegou a instalar e nao foi testada no radio real. Detalhes em `docs/release-0.5.12.md`.
+- Detalhes: `docs/release-0.5.12.md`; evidencias: `build/e2e/run-20261017T191431Z-544726-32253e` e `build/e2e/run-20261017T191540Z-545370-b34fe9`.

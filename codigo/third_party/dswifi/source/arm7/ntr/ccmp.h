@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: MIT
+// WPA2-CCMP helpers for the legacy NTR Wi-Fi path.
+
+#ifndef DSWIFI_ARM7_NTR_CCMP_H__
+#define DSWIFI_ARM7_NTR_CCMP_H__
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#define WIFI_NTR_CCMP_AAD_MAX_SIZE 24
+
+// Infer only a candidate payload length from a CTR-decrypted fixed prefix.
+// Does NOT authenticate it or expose plaintext. Full MIC validation is still
+// required before accepting/forwarding ANY bytes.
+bool Wifi_NTR_CcmpProbePayloadLength(const uint8_t key[16],
+                                     const uint8_t nonce[13],
+                                     const uint8_t *cipher, size_t available,
+                                     size_t *payload_length);
+
+// 802.11 CCMP uses a 128-bit AES key, a 13-byte nonce, and an 8-byte MIC.
+// The DS TX path sends non-QoS data frames with a 22-byte AAD. CCM uses L=2,
+// so one MSDU cannot exceed 65535 bytes.
+bool Wifi_NTR_CcmpEncrypt(const uint8_t key[16], const uint8_t nonce[13],
+                          const uint8_t aad[22], const uint8_t *plain,
+                          size_t length, uint8_t *cipher, uint8_t mic[8]);
+bool Wifi_NTR_CcmpDecrypt(const uint8_t key[16], const uint8_t nonce[13],
+                          const uint8_t aad[22], const uint8_t *cipher,
+                          size_t length, const uint8_t mic[8], uint8_t *plain);
+
+// QoS data frames authenticate the 22-byte base header plus the masked
+// two-byte QoS Control field. The fixed-size wrappers above remain for the
+// existing non-QoS callers.
+bool Wifi_NTR_CcmpEncryptAad(const uint8_t key[16], const uint8_t nonce[13],
+                             const uint8_t *aad, size_t aad_length,
+                             const uint8_t *plain, size_t length,
+                             uint8_t *cipher, uint8_t mic[8]);
+bool Wifi_NTR_CcmpDecryptAad(const uint8_t key[16], const uint8_t nonce[13],
+                             const uint8_t *aad, size_t aad_length,
+                             const uint8_t *cipher, size_t length,
+                             const uint8_t mic[8], uint8_t *plain);
+
+#endif
