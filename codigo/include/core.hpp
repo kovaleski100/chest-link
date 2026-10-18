@@ -102,6 +102,11 @@ Package exportBoxes(const Store &, const Bank &, const std::vector<unsigned> &,
 // records in each included box; excluded slots become canonical empty entries.
 Package exportSelection(const Store &, const Bank &,
                         const std::vector<uint32_t> &, Progress = {});
+// Build a checked local package from already-normalized 30-slot boxes. Used by
+// read-only save importers; importing the package always creates a new bank.
+Package packageFromBoxes(const Store &,
+                         const std::vector<std::array<uint8_t, BOX_BYTES>> &,
+                         const std::vector<std::string> &names);
 void validate(const Package &, const Store &);
 std::string importPackage(const Store &, const Package &);
 void discard(const Package &);
@@ -109,6 +114,8 @@ void discard(const Package &);
 struct Wire {
   std::function<void(void *, size_t)> read;
   std::function<void(const void *, size_t)> write;
+  // Optional for transports that distinguish a human prompt from data stalls.
+  std::function<void(unsigned)> setIdleTimeout = {};
 };
 using Accept = std::function<bool(const Offer &)>;
 std::string sendPackage(Wire &, uint32_t pin, const Package &, Progress = {});

@@ -81,6 +81,19 @@ static bool rejected_snapshot_seen;
 static u32 rejected_snapshot_hash, rejected_snapshot_base;
 static int rejected_snapshot_size;
 
+// Called with IRQs masked, so no other ARM7 producer can claim this space
+// before Wifi_RxArm9QueueAdd(). ARM9 can only free more space in the meantime.
+// Check BEFORE authenticating: that advances the CCMP replay number, which
+// cannot be rolled back safely after a failed enqueue.
+static bool Wifi_RxArm9QueueHasSpace(int size)
+{
+    const size_t needed = sizeof(u32) + round_up_32(size) + sizeof(u32);
+    if (Wifi_RxBufferAllocBuffer(needed) >= 0)
+        return true;
+    WifiData->stats[WSTAT_NTR_RX_BACKPRESSURE]++;
+    return false;
+}
+
 void Wifi_RxQueueResetRejected(void)
 {
     rejected_snapshot_seen = false;
@@ -148,7 +161,7 @@ static void Wifi_RxQueueRecoverRejected(void)
         words[i] = Wifi_MACReadHWord(base, HDR_RX_SIZE + i * 2);
 
     const u16 fc = frame[0] | ((u16)frame[1] << 8);
-    if ((fc & FC_TYPE_SUBTYPE_MASK) != TYPE_DATA ||
+    if (!Wifi_IsDataPayloadFrame(fc) ||
         !(fc & FC_PROTECTED_FRAME) ||
         (fc & (FC_FROM_DS | FC_TO_DS)) != FC_FROM_DS ||
         !Wifi_CmpMacAddr(frame + 10, WifiData->curAp.bssid) ||
@@ -188,6 +201,10 @@ static void Wifi_RxQueueRecoverRejected(void)
         hash = (hash ^ frame[i]) * 16777619u;
     if (rejected_snapshot_seen && rejected_snapshot_base == base &&
         rejected_snapshot_size == size && rejected_snapshot_hash == hash)
+        return;
+    // CCMP removes an 8-byte header and 8-byte MIC. Keep this snapshot
+    // retryable while the ARM9 queue is full, including its replay number.
+    if (!Wifi_RxArm9QueueHasSpace(size - 16))
         return;
     rejected_snapshot_seen = true;
     rejected_snapshot_base = base;
@@ -243,6 +260,9 @@ void Wifi_RxQueueFlush(void)
         {
             if (packetlen <= (int)sizeof(frame))
             {
+                if (packetlen >= HDR_DATA_MAC_SIZE + 16 &&
+                    !Wifi_RxArm9QueueHasSpace(packetlen - 16))
+                    break; // Retry this committed frame after ARM9 drains.
                 Wifi_MACRead((u16 *)frame, base, HDR_RX_SIZE, packetlen);
                 size_t plain_size = 0;
                 forward = Wifi_NTR_WpaProcessRx(frame, packetlen, frame,

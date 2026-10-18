@@ -55,6 +55,11 @@ int Wifi_TxArm9QueueFlush(void);
 // try with the ARM9 queue.
 void Wifi_TxAllQueueFlush(void);
 
+// Track WPA2 data transmissions and retry a frame when the NTR MAC reports
+// that it could not deliver it. Returns true if a retry was started.
+void Wifi_NTR_TxNotifyStart(bool wpa2, bool tracked_ack);
+bool Wifi_NTR_TxOnComplete(void);
+
 void Wifi_Intr_MultiplayCmdDone(void);
 
 #endif // DSWIFI_ARM7_NTR_TX_QUEUE_H__

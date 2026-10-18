@@ -18,6 +18,8 @@ void Wifi_Intr_RxEnd(void)
 
 void Wifi_Intr_TxEnd(void)
 {
+    if (Wifi_NTR_TxOnComplete())
+        return;
     Wifi_TxAllQueueFlush();
 }
 

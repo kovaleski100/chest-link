@@ -105,11 +105,15 @@ void dswifi_send_data_to_lwip(void *data, u32 len)
 
     struct pbuf *p = pbuf_alloc(PBUF_IP, len, PBUF_POOL);
     if (!p)
+    {
+        WifiData->stats[WSTAT_NTR_RX_LWIP_DROPPED]++;
         return;
+    }
 
     if (len > p->tot_len)
     {
         // If we can't allocate a buffer big enough for the packet, drop it
+        WifiData->stats[WSTAT_NTR_RX_LWIP_DROPPED]++;
         pbuf_free(p);
         return;
     }
@@ -147,7 +151,12 @@ void dswifi_send_data_to_lwip(void *data, u32 len)
     // If it doesn't return ERR_OK it means that the packet wasn't handled and
     // we need to free it ourselves.
     if (dswifi_netif.input(p, &dswifi_netif) != ERR_OK)
+    {
+        WifiData->stats[WSTAT_NTR_RX_LWIP_DROPPED]++;
         pbuf_free(p);
+    }
+    else
+        WifiData->stats[WSTAT_NTR_RX_LWIP_PACKETS]++;
 }
 
 err_t dswifi_init_fn(struct netif *netif)

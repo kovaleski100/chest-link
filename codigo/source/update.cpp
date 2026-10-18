@@ -100,16 +100,20 @@ UpdateResult updateBinary(
   bool installedBackup = false;
   std::string backup;
   try {
+    if (wire.setIdleTimeout)
+      wire.setIdleTimeout(UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS);
     uint8_t decision[4];
     put32(decision, 1);
     wire.write(decision, sizeof(decision));
     result(wire);
 
     Sha256 sha;
+    // Show the first progress update promptly, then retain efficient SD writes
+    // and avoid yielding a screen frame for every 512 bytes of the image.
     uint8_t block[4096];
     uint32_t done = 0;
     while (done < bytes) {
-      size_t n = std::min<size_t>(sizeof(block), bytes - done);
+      size_t n = std::min<size_t>(done ? sizeof(block) : 512, bytes - done);
       wire.read(block, n);
       if (std::fwrite(block, 1, n, file) != n)
         throw Error("Falha ao gravar atualizacao no SD.");

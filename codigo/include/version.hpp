@@ -3,8 +3,8 @@
 #include <string>
 
 #define CHEST_LINK_VERSION_MAJOR 0
-#define CHEST_LINK_VERSION_MINOR 4
-#define CHEST_LINK_VERSION_PATCH 28
+#define CHEST_LINK_VERSION_MINOR 5
+#define CHEST_LINK_VERSION_PATCH 14
 
 namespace chestlink {
 constexpr uint32_t APP_VERSION_CODE =

@@ -30,6 +30,16 @@ struct BoxScreen {
 void box(const BoxScreen &);
 // 0..29 slots; 30 previous,31 next; 32 mark,33 box,34 all,35 send,36 back.
 int boxHit(int x, int y);
+struct GameBoxesScreen {
+  std::vector<std::string> games;
+  std::string game, boxName, status;
+  unsigned gameIndex = 0, box = 0, boxes = 0, cursor = 0;
+  unsigned targetCursor = 0, targetCount = 0;
+  std::array<chestlink::PokemonPreview, 30> source{}, target{};
+};
+void gameBoxes(const GameBoxesScreen &);
+// 0..29 source slots; 30 copy one,31 copy the whole box,32 save,33 back.
+int gameBoxesHit(const GameBoxesScreen &, int x, int y);
 const uint16_t *topPixels();
 const uint16_t *bottomPixels();
 } // namespace gui

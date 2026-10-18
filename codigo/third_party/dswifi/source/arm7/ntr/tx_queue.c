@@ -13,9 +13,69 @@
 #include "common/common_ntr_defs.h"
 #include "common/ieee_defs.h"
 #include "common/random.h"
+#include "common/ntr_tcp_diag.h"
 
 static u16 wifi_tx_queue[1024];
 static u16 wifi_tx_queue_len = 0; // Length in halfwords
+
+#define WIFI_NTR_TX_SOFTWARE_RETRIES 2
+
+static bool wifi_ntr_tx_wpa2_pending;
+static bool wifi_ntr_tx_tracked_ack;
+static u8 wifi_ntr_tx_retry_count;
+
+void Wifi_NTR_TxNotifyStart(bool wpa2, bool tracked_ack)
+{
+    wifi_ntr_tx_wpa2_pending = wpa2;
+    wifi_ntr_tx_tracked_ack = tracked_ack;
+    wifi_ntr_tx_retry_count = 0;
+}
+
+bool Wifi_NTR_TxOnComplete(void)
+{
+    if (!wifi_ntr_tx_wpa2_pending)
+        return false;
+
+    const u16 header_status = W_MACMEM(MAC_TXBUF_START_OFFSET + HDR_TX_STATUS);
+    const u16 raw_status = W_TXSTAT;
+    WifiData->stats[WSTAT_NTR_TX_COMPLETIONS]++;
+    WifiData->stats[WSTAT_NTR_TX_HEADER_STATUS] = header_status;
+    WifiData->stats[WSTAT_NTR_TX_RAW_STATUS] = raw_status;
+
+    // DSWifi's existing CMD retry path identifies status 5 as a transmit
+    // failure. Re-submit the still-resident protected MPDU at most twice.
+    // The retry bit is masked from CCMP AAD, so the authenticated ciphertext,
+    // packet number and sequence number remain unchanged as 802.11 requires.
+    if (header_status == 5)
+    {
+        if (wifi_ntr_tx_tracked_ack)
+            WifiData->stats[WSTAT_NTR_ACK_TX_FAILURES]++;
+
+        if (wifi_ntr_tx_retry_count < WIFI_NTR_TX_SOFTWARE_RETRIES)
+        {
+            wifi_ntr_tx_retry_count++;
+            if (wifi_ntr_tx_tracked_ack)
+                WifiData->stats[WSTAT_NTR_ACK_TX_RETRIES]++;
+
+            const u32 frame_control_address = MAC_TXBUF_START_OFFSET +
+                                              HDR_TX_SIZE + HDR_DATA_FRAME_CONTROL;
+            W_MACMEM(frame_control_address) |= FC_RETRY;
+            W_MACMEM(MAC_TXBUF_START_OFFSET + HDR_TX_STATUS) = 0;
+            W_TX_RETRYLIMIT = 0x0707;
+            W_TXBUF_LOC3 = TXBUF_LOCN_ENABLE | (MAC_TXBUF_START_OFFSET >> 1);
+            W_TXREQ_SET = TXBIT_LOC3 | TXBIT_LOC2 | TXBIT_LOC1;
+            return true;
+        }
+
+        if (wifi_ntr_tx_tracked_ack)
+            WifiData->stats[WSTAT_NTR_ACK_TX_RETRY_LIMIT]++;
+    }
+
+    wifi_ntr_tx_wpa2_pending = false;
+    wifi_ntr_tx_tracked_ack = false;
+    wifi_ntr_tx_retry_count = 0;
+    return false;
+}
 
 // Make sure that the biggest packet we can store fits in MAC_TXBUF_END_OFFSET
 static_assert(sizeof(wifi_tx_queue) < MAC_TXBUF_END_OFFSET);
@@ -51,6 +111,7 @@ static bool Wifi_TxReplyIsEnqueued(void)
 
 void Wifi_TxRaw(u16 *data, int datalen)
 {
+    Wifi_NTR_TxNotifyStart(false, false);
     datalen = round_up_32(datalen);
     Wifi_MACWrite(data, MAC_TXBUF_START_OFFSET, datalen);
 
@@ -209,6 +270,8 @@ static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
 
 static int Wifi_TxArm9QueueFlushByLoc3(void)
 {
+    Wifi_NTR_TcpInfo tcp = {0};
+    bool tracked_ack = false;
     // Base addresses of the headers
     u32 tx_base = MAC_TXBUF_START_OFFSET;
     u32 ieee_base = MAC_TXBUF_START_OFFSET + HDR_TX_SIZE;
@@ -230,6 +293,9 @@ static int Wifi_TxArm9QueueFlushByLoc3(void)
         for (size_t i = 0; i < frame_len; ++i)
             frame[i] = Wifi_MacReadByte(ieee_base + i);
 
+        tracked_ack = Wifi_NTR_TcpFromWifi(frame, frame_len, true, &tcp) &&
+                      Wifi_NTR_TcpIsTrackedAck(WifiData, &tcp);
+
         if (!Wifi_NTR_WpaEncryptTx(frame, frame_len))
         {
             WLOG_PUTS("W: WPA2 transmit dropped (CCMP not ready)\n");
@@ -238,6 +304,9 @@ static int Wifi_TxArm9QueueFlushByLoc3(void)
         }
         Wifi_MACWrite((const u16 *)frame, ieee_base, frame_len);
     }
+
+    Wifi_NTR_TxNotifyStart(WifiData->curAp.security_type == AP_SECURITY_WPA2,
+                           tracked_ack);
 
     // Add WEP IV and key ID if required.
     if ((WifiData->curAp.security_type == AP_SECURITY_WEP) &&
@@ -259,6 +328,12 @@ static int Wifi_TxArm9QueueFlushByLoc3(void)
     W_TX_RETRYLIMIT = 0x0707;
     W_TXBUF_LOC3    = TXBUF_LOCN_ENABLE | (MAC_TXBUF_START_OFFSET >> 1);
     W_TXREQ_SET     = TXBIT_LOC3 | TXBIT_LOC2 | TXBIT_LOC1;
+
+    if (tracked_ack)
+    {
+        WifiData->stats[WSTAT_NTR_TCP_ACK_ENCRYPTED]++;
+        WifiData->stats[WSTAT_NTR_TCP_ACK_RADIO_VALUE] = tcp.ack;
+    }
 
     return 1;
 }

@@ -3,7 +3,7 @@ FLAGS := -std=c++17 -g -Wall -Wextra -Werror -pthread -DCL_HOST -Iinclude
 ASAN_OPTIONS ?= detect_leaks=1
 CORE := source/json.cpp source/sha256.cpp source/bank.cpp source/protocol.cpp source/mailbox.cpp source/update.cpp host/native_saves/raw_file_save_source.cpp
 NETWORK := source/network.cpp platform/host/runtime.cpp
-.PHONY: all test nds-wpa-test nds-wpa-sanitize nds-raw-rx-test nds-raw-rx-sanitize nds-association-test nds-netif-test nds-packet-queue-test nds-packet-queue-sanitize nds-dhcp-test nds-dhcp-sanitize mailbox-test gui-test gui-sanitize sanitize mailbox-sanitize ds 3ds clean e2e e2e-server e2e-protocol e2e-ds e2e-3ds e2e-ds-to-pc e2e-hgss e2e-harness-test
+.PHONY: all test nds-wpa-test nds-wpa-sanitize nds-raw-rx-test nds-raw-rx-sanitize nds-tx-retry-test nds-association-test nds-netif-test nds-packet-queue-test nds-packet-queue-sanitize nds-dhcp-test nds-dhcp-sanitize nds-discovery-timeout-test mailbox-test gui-test gui-sanitize sanitize mailbox-sanitize ds 3ds consoles release console-ports-test console-ports-sanitize clean e2e e2e-server e2e-protocol e2e-ds e2e-3ds e2e-ds-to-pc e2e-hgss e2e-harness-test
 all: build/chest-link-cli
 build:
 	mkdir -p build
@@ -15,6 +15,8 @@ build/mailbox-probe: $(CORE) $(NETWORK) tests/mailbox_probe.cpp $(wildcard inclu
 	$(CXX) $(FLAGS) -O2 $(CORE) $(NETWORK) tests/mailbox_probe.cpp -o $@
 build/update-probe: $(CORE) $(NETWORK) tests/update_probe.cpp $(wildcard include/*.hpp) | build
 	$(CXX) $(FLAGS) -O2 $(CORE) $(NETWORK) tests/update_probe.cpp -o $@
+build/discovery-probe: $(NETWORK) tests/discovery_probe.cpp $(wildcard include/*.hpp) | build
+	$(CXX) $(FLAGS) -O2 $(NETWORK) tests/discovery_probe.cpp -o $@
 build/extdata-tests: platform/3ds/extdata.cpp platform/3ds/extdata.hpp tests/extdata_test.cpp tests/fake-sdk/3ds.h tests/fake-sdk/sys/iosupport.h | build
 	$(CXX) $(FLAGS) -O2 -Itests/fake-sdk platform/3ds/extdata.cpp tests/extdata_test.cpp -o $@
 build/pksm-storage-tests: platform/3ds/pksm_storage.hpp tests/pksm_storage_test.cpp | build
@@ -39,6 +41,10 @@ nds-raw-rx-test: build/nds-raw-rx-tests
 nds-raw-rx-sanitize: | build
 	$(CC) $(NDS_WPA_FLAGS) -O1 -fno-omit-frame-pointer -fsanitize=address,undefined tests/nds_raw_rx_test.c $(NDS_WPA_CRYPTO) -o build/nds-raw-rx-sanitized
 	ASAN_OPTIONS="$(ASAN_OPTIONS)" ./build/nds-raw-rx-sanitized
+build/nds-tx-retry-tests: tests/nds_tx_retry_test.c $(DSWIFI)/source/arm7/ntr/tx_queue.c $(NDS_WPA_HEADERS) | build
+	$(CC) $(NDS_WPA_FLAGS) -ffunction-sections -fdata-sections -O2 tests/nds_tx_retry_test.c -Wl,--gc-sections -o $@
+nds-tx-retry-test: build/nds-tx-retry-tests
+	./build/nds-tx-retry-tests
 build/nds-association-tests: tests/nds_association_test.c $(DSWIFI)/source/arm9/access_point.c $(NDS_WPA_HEADERS) | build
 	$(CC) -std=gnu17 -g -Wall -Wextra -Werror -DARM9 -DDSWIFI_ENABLE_LWIP -Itests/fake-nds-sdk -I$(DSWIFI)/source -I$(DSWIFI)/include -O2 tests/nds_association_test.c -o $@
 nds-association-test: build/nds-association-tests
@@ -68,40 +74,49 @@ nds-dhcp-sanitize: | build
 	ASAN_OPTIONS="$(ASAN_OPTIONS)" ./build/nds-dhcp-sanitized
 build/network-status-tests: tests/network_status_test.cpp include/network_status.hpp | build
 	$(CXX) $(FLAGS) -O2 tests/network_status_test.cpp -o $@
+build/nds-discovery-timeout-tests: source/network.cpp tests/nds_discovery_timeout_test.cpp tests/fake-nds-sdk/nds_network.h $(wildcard include/*.hpp) | build
+	$(CXX) -std=c++17 -g -Wall -Wextra -Werror -pthread -DCL_NDS -Iinclude -Itests/fake-nds-sdk -include tests/fake-nds-sdk/nds_network.h -O2 source/network.cpp tests/nds_discovery_timeout_test.cpp -Wl,--wrap=sendto,--wrap=recvfrom,--wrap=connect,--wrap=select,--wrap=recv -o $@
+nds-discovery-timeout-test: build/nds-discovery-timeout-tests
+	./build/nds-discovery-timeout-tests
+build/image-scaling-tests: tests/image_scaling_test.cpp source/graphics.cpp $(wildcard include/*.hpp) | build
+	$(CXX) $(FLAGS) -O2 -ffunction-sections -fdata-sections tests/image_scaling_test.cpp -Wl,--gc-sections -o $@
 build/console-ports-tests: tests/console_ports_test.cpp $(CORE) $(wildcard include/*.hpp) platform/3ds/network_snapshot.hpp platform/3ds/app_location.hpp | build
 	$(CXX) $(FLAGS) -O2 tests/console_ports_test.cpp $(CORE) -o $@
 build/3ds-network-tests: tests/3ds_network_test.cpp platform/3ds/network_state.cpp platform/3ds/network_state.hpp platform/3ds/network_snapshot.hpp tests/fake-network-sdk/3ds.h $(wildcard include/*.hpp) | build
-	$(CXX) $(FLAGS) -O2 -Itests/fake-network-sdk tests/3ds_network_test.cpp platform/3ds/network_state.cpp -Wl,--wrap=gethostid,--wrap=socket,--wrap=close,--wrap=ioctl,--wrap=connect,--wrap=select,--wrap=getsockopt -o $@
+	$(CXX) $(FLAGS) -O2 -Itests/fake-network-sdk tests/3ds_network_test.cpp platform/3ds/network_state.cpp -Wl,--wrap=gethostid,--wrap=socket,--wrap=close,--wrap=ioctl,--wrap=setsockopt,--wrap=sendto,--wrap=recvfrom -o $@
 build/listener-lifecycle-tests: tests/listener_lifecycle_test.cpp source/app.cpp source/network.cpp $(CORE) $(wildcard include/*.hpp) | build
 	$(CXX) $(FLAGS) -DCL_3DS -O2 tests/listener_lifecycle_test.cpp source/network.cpp $(CORE) -Wl,--wrap=socket,--wrap=close,--wrap=ioctl,--wrap=setsockopt,--wrap=bind,--wrap=listen,--wrap=accept -o $@
-console-ports-test: build/console-ports-tests build/3ds-network-tests build/listener-lifecycle-tests
+console-ports-test: build/console-ports-tests build/3ds-network-tests build/listener-lifecycle-tests build/nds-discovery-timeout-tests build/image-scaling-tests
 	./build/console-ports-tests
 	./build/3ds-network-tests
 	./build/listener-lifecycle-tests
+	./build/nds-discovery-timeout-tests
+	./build/image-scaling-tests
 	python3 -m unittest discover -s tests -p test_release_pair.py -v
 	python3 -m unittest discover -s tests -p test_ftp_install.py -v
 test: console-ports-test
 console-ports-sanitize: | build
 	$(CXX) $(FLAGS) -O1 -fno-omit-frame-pointer -fsanitize=address,undefined tests/console_ports_test.cpp $(CORE) -o build/console-ports-sanitized
 	ASAN_OPTIONS="$(ASAN_OPTIONS)" ./build/console-ports-sanitized
-	$(CXX) $(FLAGS) -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -Itests/fake-network-sdk tests/3ds_network_test.cpp platform/3ds/network_state.cpp -Wl,--wrap=gethostid,--wrap=socket,--wrap=close,--wrap=ioctl,--wrap=connect,--wrap=select,--wrap=getsockopt -o build/3ds-network-sanitized
+	$(CXX) $(FLAGS) -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -Itests/fake-network-sdk tests/3ds_network_test.cpp platform/3ds/network_state.cpp -Wl,--wrap=gethostid,--wrap=socket,--wrap=close,--wrap=ioctl,--wrap=setsockopt,--wrap=sendto,--wrap=recvfrom -o build/3ds-network-sanitized
 	ASAN_OPTIONS="$(ASAN_OPTIONS)" ./build/3ds-network-sanitized
 	$(CXX) $(FLAGS) -DCL_3DS -O1 -fno-omit-frame-pointer -fsanitize=address,undefined tests/listener_lifecycle_test.cpp source/network.cpp $(CORE) -Wl,--wrap=socket,--wrap=close,--wrap=ioctl,--wrap=setsockopt,--wrap=bind,--wrap=listen,--wrap=accept -o build/listener-lifecycle-sanitized
 	ASAN_OPTIONS="$(ASAN_OPTIONS)" ./build/listener-lifecycle-sanitized
-test: build/tests build/extdata-tests build/pksm-storage-tests build/nds-update-cleanup-tests build/nds-wpa-tests build/nds-raw-rx-tests build/nds-association-tests build/nds-netif-tests build/nds-packet-queue-tests build/nds-dhcp-tests build/network-status-tests
+test: build/tests build/extdata-tests build/pksm-storage-tests build/nds-update-cleanup-tests build/nds-wpa-tests build/nds-raw-rx-tests build/nds-tx-retry-tests build/nds-association-tests build/nds-netif-tests build/nds-packet-queue-tests build/nds-dhcp-tests build/network-status-tests
 	./build/tests
 	./build/extdata-tests
 	./build/pksm-storage-tests
 	./build/nds-update-cleanup-tests
 	./build/nds-wpa-tests
 	./build/nds-raw-rx-tests
+	./build/nds-tx-retry-tests
 	./build/nds-association-tests
 	./build/nds-netif-tests
 	./build/nds-packet-queue-tests
 	./build/nds-dhcp-tests
 	./build/network-status-tests
 	python3 -m unittest discover -s tests -p test_native_saves.py -v
-mailbox-test: build/chest-link-cli build/mailbox-probe build/update-probe
+mailbox-test: build/chest-link-cli build/mailbox-probe build/update-probe build/discovery-probe
 	python3 -m unittest discover -s tests -p test_mailbox.py -v
 GRAPHICS := source/graphics.cpp source/graphics_assets.cpp source/pokemon.cpp
 build/render-ui: $(GRAPHICS) source/sha256.cpp tools/render_ui.cpp $(wildcard include/*.hpp) | build

@@ -10,6 +10,7 @@ unsigned keys() { return 0; }
 void clear() {}
 void network() {}
 std::string ip() { return "127.0.0.1"; }
+std::string updateNetworkDiagnostics() { return "driver=host"; }
 uint64_t milliseconds() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -22,4 +23,5 @@ bool pollNetwork() {
 }
 unsigned maxChestBoxes() { return 50; }
 std::vector<chestlink::Store> stores() { return {}; }
+std::vector<std::string> gameSaveSearchRoots() { return {}; }
 } // namespace platform

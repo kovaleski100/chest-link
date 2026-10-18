@@ -17,6 +17,8 @@ chestlink::NetworkStatus live;
 bool failIP = false;
 enum class Failure { none, socket, ioctl, bind, listen };
 Failure failure = Failure::none;
+std::string lastNotice;
+unsigned noticeCalls = 0;
 }
 
 namespace platform {
@@ -49,7 +51,10 @@ unsigned removePreviousApplicationVersions(uint32_t, bool &complete) {
 }
 }
 namespace gui {
-void notice(const std::string &, const std::string &, const std::string &, int) {}
+void notice(const std::string &, const std::string &body, const std::string &, int) {
+  lastNotice = body;
+  ++noticeCalls;
+}
 void menu(const std::string &, const std::vector<std::string> &, unsigned, const std::string &) {}
 int menuHit(int, int, unsigned, unsigned) { return -1; }
 void box(const BoxScreen &) {}
@@ -92,6 +97,17 @@ int __wrap_accept(int fd, sockaddr *, socklen_t *) {
 }
 
 int main() {
+  auto download = progress("Baixando atualizacao");
+  assert(download(512, 1402368));
+  assert(lastNotice == "512 / 1402368");
+  const unsigned firstNotice = noticeCalls;
+  assert(download(4608, 1402368));
+  assert(lastNotice == "4608 / 1402368" && noticeCalls == firstNotice + 1);
+  assert(download(8704, 1402368));
+  assert(lastNotice == "8704 / 1402368" && noticeCalls == firstNotice + 2);
+  assert(download(8704, 1402368));
+  assert(noticeCalls == firstNotice + 2);
+
   live.visible = live.connected = live.ipv4Ready = true;
   live.ssid = "test network"; live.ip = "10.0.0.201";
   // Reproduce the post-update dialog that pumps serviceIncoming before start.

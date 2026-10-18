@@ -9,6 +9,7 @@
 #include "arm7/ipc.h"
 #include "arm7/ntr/tx_queue.h"
 #include "arm7/ntr/wpa.h"
+#include "common/ntr_tcp_diag.h"
 #include "arm7/twl/ieee/wpa.h"
 #include "common/common_ntr_defs.h"
 #include "common/ieee_defs.h"
@@ -30,6 +31,8 @@
 #define WPA_KEY_INFO_SECURE 0x0200
 #define WPA_KEY_INFO_ENCRYPTED 0x1000
 #define WPA_EAPOL_MAX_SIZE 512
+#define WPA_CCMP_NON_QOS_TID 16
+#define WPA_CCMP_RX_TID_COUNT (WPA_CCMP_NON_QOS_TID + 1)
 #define WPA_FRAME_MAX_SIZE (sizeof(Wifi_TxHeader) + HDR_DATA_MAC_SIZE + 8 + \
                             WPA_EAPOL_MAX_SIZE)
 
@@ -49,8 +52,8 @@ static ptk_keyinfo wpa_ptk;
 static gtk_keyinfo wpa_gtk;
 static u64 wpa_handshake_replay;
 static u64 wpa_tx_pn;
-static u64 wpa_pairwise_rx_pn;
-static u64 wpa_group_rx_pn;
+static u64 wpa_pairwise_rx_pn[WPA_CCMP_RX_TID_COUNT];
+static u64 wpa_group_rx_pn[WPA_CCMP_RX_TID_COUNT];
 static u16 wpa_tx_sequence;
 
 static u16 read_be16(const u8 *data)
@@ -114,7 +117,22 @@ static void write_ccmp_header(u8 *header, u64 pn)
     header[7] = (pn >> 40) & 0xFF;
 }
 
-static void make_ccmp_aad(const u8 *frame, u8 aad[22])
+// The legacy DS network joins infrastructure APs with three-address frames.
+// QoS Data adds a two-byte QoS Control field. Four-address/WDS and QoS frames
+// carrying HT Control are outside the NTR radio's supported 802.11b format.
+static size_t data_header_length(u16 frame_control)
+{
+    if (!Wifi_IsDataPayloadFrame(frame_control) ||
+        (frame_control & (FC_TO_DS | FC_FROM_DS)) ==
+            (FC_TO_DS | FC_FROM_DS) ||
+        (frame_control & FC_ORDER))
+        return 0;
+
+    return HDR_DATA_MAC_SIZE + (Wifi_IsQosDataFrame(frame_control) ? 2 : 0);
+}
+
+static size_t make_ccmp_aad(const u8 *frame,
+                            u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE])
 {
     // Mask fields that can change during retransmission or delivery.
     aad[0] = frame[0] & 0x8F;
@@ -122,12 +140,26 @@ static void make_ccmp_aad(const u8 *frame, u8 aad[22])
     memcpy(aad + 2, frame + 4, 18); // A1, A2, A3
     aad[20] = frame[22] & 0x0F; // Fragment number only.
     aad[21] = 0;
+    const u16 frame_control = frame[0] | ((u16)frame[1] << 8);
+    if (!Wifi_IsQosDataFrame(frame_control))
+        return 22;
+
+    aad[22] = frame[24] & 0x0F; // TID only; mask other QoS Control bits.
+    aad[23] = 0;
+    return 24;
+}
+
+static void set_group_rx_rsc(u64 rsc)
+{
+    for (size_t tid = 0; tid < WPA_CCMP_RX_TID_COUNT; ++tid)
+        wpa_group_rx_pn[tid] = rsc;
 }
 
 static void make_ccmp_nonce(const u8 *frame, const u8 *ccmp_header,
                             u8 nonce[13])
 {
-    nonce[0] = 0; // Non-QoS data priority.
+    const u16 frame_control = frame[0] | ((u16)frame[1] << 8);
+    nonce[0] = Wifi_IsQosDataFrame(frame_control) ? frame[24] & 0x0F : 0;
     memcpy(nonce + 1, frame + 10, 6); // Transmitter address.
     nonce[7] = ccmp_header[7];
     nonce[8] = ccmp_header[6];
@@ -221,18 +253,22 @@ static bool verify_eapol_mic(const u8 *eapol, size_t eapol_len)
 
 static bool handle_eapol(const u8 *frame, size_t frame_len)
 {
-    if (frame_len < HDR_DATA_MAC_SIZE + 8 + 4 ||
+    if (!frame || frame_len < HDR_DATA_MAC_SIZE)
+        return false;
+    const u16 frame_control = frame[0] | ((u16)frame[1] << 8);
+    const size_t header_len = data_header_length(frame_control);
+    if (!header_len || frame_len < header_len + 8 + 4 ||
         !Wifi_CmpMacAddr(frame + 4, WifiData->MacAddr) ||
         !Wifi_CmpMacAddr(frame + 10, WifiData->curAp.bssid))
         return false;
 
-    const u8 *snap = frame + HDR_DATA_MAC_SIZE;
+    const u8 *snap = frame + header_len;
     if (snap[0] != 0xAA || snap[1] != 0xAA || snap[2] != 0x03 ||
         snap[3] || snap[4] || snap[5] || snap[6] != 0x88 || snap[7] != 0x8E)
         return false;
 
     const u8 *eapol = snap + 8;
-    const size_t available = frame_len - HDR_DATA_MAC_SIZE - 8;
+    const size_t available = frame_len - header_len - 8;
     if (available < WPA_KEY_DATA_OFFSET || eapol[1] != WPA_EAPOL_TYPE_KEY ||
         eapol[4] != WPA_KEY_DESCRIPTOR_RSN)
         return false;
@@ -324,7 +360,7 @@ static bool handle_eapol(const u8 *frame, size_t frame_len)
                 WifiData->authlevel = WIFI_AUTHLEVEL_ERROR;
                 return false;
             }
-            wpa_group_rx_pn = read_le48(eapol + 65);
+            set_group_rx_rsc(read_le48(eapol + 65));
         }
 
         if (!send_eapol_key(0x030A, replay, NULL, NULL, 0, true))
@@ -361,7 +397,7 @@ static bool handle_eapol(const u8 *frame, size_t frame_len)
             send_eapol_key(0x0302, replay, NULL, NULL, 0, true))
         {
             memcpy(&wpa_gtk, &new_gtk, sizeof(wpa_gtk));
-            wpa_group_rx_pn = read_le48(eapol + 65);
+            set_group_rx_rsc(read_le48(eapol + 65));
             wpa_handshake_replay = replay;
         }
         memset(&new_gtk, 0, sizeof(new_gtk));
@@ -378,8 +414,8 @@ static void reset_handshake(void)
     wipe_volatile((volatile u8 *)&wpa_gtk, sizeof(wpa_gtk));
     wpa_handshake_replay = 0;
     wpa_tx_pn = 0;
-    wpa_pairwise_rx_pn = 0;
-    wpa_group_rx_pn = 0;
+    memset(wpa_pairwise_rx_pn, 0, sizeof(wpa_pairwise_rx_pn));
+    memset(wpa_group_rx_pn, 0, sizeof(wpa_group_rx_pn));
     wpa_tx_sequence = 0;
     wpa_state = WPA_NTR_IDLE;
 }
@@ -501,19 +537,23 @@ bool Wifi_NTR_WpaEncryptTx(u8 *frame, size_t frame_len)
     frame[23] = wpa_tx_sequence >> 8;
     wpa_tx_sequence = (wpa_tx_sequence + 0x10) & 0xFFF0;
 
-    u8 aad[22], nonce[13];
-    make_ccmp_aad(frame, aad);
+    u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE], nonce[13];
+    const size_t aad_len = make_ccmp_aad(frame, aad);
     make_ccmp_nonce(frame, ccmp_header, nonce);
-    return Wifi_NTR_CcmpEncrypt(wpa_ptk.tk, nonce, aad,
-                                cipher, plain_len, cipher,
-                                cipher + plain_len);
+    return Wifi_NTR_CcmpEncryptAad(wpa_ptk.tk, nonce, aad, aad_len,
+                                   cipher, plain_len, cipher,
+                                   cipher + plain_len);
 }
 
 size_t Wifi_NTR_WpaProbeRxSize(const u8 *frame, size_t available)
 {
-    if (!frame || !Wifi_NTR_WpaIsReady() || available < HDR_DATA_MAC_SIZE + 32)
+    if (!frame || available < HDR_DATA_MAC_SIZE || !Wifi_NTR_WpaIsReady())
         return 0;
-    const u8 *header = frame + HDR_DATA_MAC_SIZE;
+    const u16 frame_control = frame[0] | ((u16)frame[1] << 8);
+    const size_t header_len = data_header_length(frame_control);
+    if (!header_len || available < header_len + 32)
+        return 0;
+    const u8 *header = frame + header_len;
     if (!(header[3] & 0x20) || (header[3] & 0x1F) != 0)
         return 0;
     const u8 *key = wpa_ptk.tk;
@@ -528,10 +568,10 @@ size_t Wifi_NTR_WpaProbeRxSize(const u8 *frame, size_t available)
     make_ccmp_nonce(frame, header, nonce);
     size_t payload_length = 0;
     if (!Wifi_NTR_CcmpProbePayloadLength(key, nonce, header + 8,
-                                        available - HDR_DATA_MAC_SIZE - 16,
+                                        available - header_len - 16,
                                         &payload_length))
         return 0;
-    return HDR_DATA_MAC_SIZE + 16 + payload_length;
+    return header_len + 16 + payload_length;
 }
 
 bool Wifi_NTR_WpaProcessRx(const u8 *frame, size_t frame_len,
@@ -554,43 +594,48 @@ bool Wifi_NTR_WpaProcessRx(const u8 *frame, size_t frame_len,
     }
 
     WifiData->stats[WSTAT_NTR_CCMP_RX]++;
-    if (!Wifi_NTR_WpaIsReady() || frame_len < HDR_DATA_MAC_SIZE + 16 ||
+    const size_t header_len = data_header_length(frame_control);
+    if (!Wifi_NTR_WpaIsReady() || !header_len ||
+        frame_len < header_len + 16 ||
         !Wifi_CmpMacAddr(frame + 10, WifiData->curAp.bssid))
         return false;
 
-    const u8 *ccmp_header = frame + HDR_DATA_MAC_SIZE;
+    const u8 *ccmp_header = frame + header_len;
     if (!(ccmp_header[3] & 0x20) || (ccmp_header[3] & 0x1F) != 0)
         return false;
 
     const bool multicast = (frame[4] & 1) != 0;
     const u8 *key = wpa_ptk.tk;
-    u64 *last_pn = &wpa_pairwise_rx_pn;
+    const size_t tid = Wifi_IsQosDataFrame(frame_control)
+                           ? frame[24] & 0x0F
+                           : WPA_CCMP_NON_QOS_TID;
+    u64 *last_pn = &wpa_pairwise_rx_pn[tid];
     if (multicast)
     {
         if (memcmp(wpa_gtk.keytype, "\x00\x0f\xac\x01", 4) != 0 ||
             (ccmp_header[3] >> 6) != (wpa_gtk.keyidx & 0x03))
             return false;
         key = wpa_gtk.key;
-        last_pn = &wpa_group_rx_pn;
+        last_pn = &wpa_group_rx_pn[tid];
     }
 
     const u64 pn = read_ccmp_pn(ccmp_header);
     if (pn <= *last_pn)
         return false;
 
-    const size_t encrypted_len = frame_len - HDR_DATA_MAC_SIZE - 16;
-    if (HDR_DATA_MAC_SIZE + encrypted_len > output_capacity)
+    const size_t encrypted_len = frame_len - header_len - 16;
+    if (header_len + encrypted_len > output_capacity)
         return false;
 
     if (output != frame)
-        memcpy(output, frame, HDR_DATA_MAC_SIZE);
-    u8 *plain = output + HDR_DATA_MAC_SIZE;
-    u8 aad[22], nonce[13];
-    make_ccmp_aad(frame, aad);
+        memcpy(output, frame, header_len);
+    u8 *plain = output + header_len;
+    u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE], nonce[13];
+    const size_t aad_len = make_ccmp_aad(frame, aad);
     make_ccmp_nonce(frame, ccmp_header, nonce);
-    if (!Wifi_NTR_CcmpDecrypt(key, nonce, aad,
-                              ccmp_header + 8, encrypted_len,
-                              ccmp_header + 8 + encrypted_len, plain))
+    if (!Wifi_NTR_CcmpDecryptAad(key, nonce, aad, aad_len,
+                                 ccmp_header + 8, encrypted_len,
+                                 ccmp_header + 8 + encrypted_len, plain))
     {
         WifiData->stats[WSTAT_NTR_CCMP_MIC_FAILED]++;
         return false;
@@ -598,8 +643,17 @@ bool Wifi_NTR_WpaProcessRx(const u8 *frame, size_t frame_len,
 
     WifiData->stats[WSTAT_NTR_CCMP_VALID]++;
     output[1] &= ~0x40; // Remove Protected bit after successful verification.
-    *output_len = HDR_DATA_MAC_SIZE + encrypted_len;
+    *output_len = header_len + encrypted_len;
     *last_pn = pn;
+    Wifi_NTR_TcpInfo tcp;
+    if (Wifi_NTR_TcpFromWifi(output, *output_len, false, &tcp) && tcp.payload)
+    {
+        WifiData->stats[WSTAT_NTR_TCP_RADIO_PACKETS]++;
+        WifiData->stats[WSTAT_NTR_TCP_RADIO_SEQ] = tcp.seq;
+        WifiData->stats[WSTAT_NTR_TCP_RADIO_BYTES] = tcp.payload;
+        WifiData->stats[WSTAT_NTR_TCP_LOCAL_PORT] = tcp.dst;
+        WifiData->stats[WSTAT_NTR_TCP_REMOTE_PORT] = tcp.src;
+    }
     // Encrypted group-key updates are also EAPOL and must stay on the ARM7,
     // rather than reaching lwIP as if they were application data.
     if (encrypted_len >= 8 && memcmp(plain, "\xAA\xAA\x03\x00\x00\x00\x88\x8E", 8) == 0)

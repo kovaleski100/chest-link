@@ -51,7 +51,7 @@ int Wifi_RxBufferAllocBuffer(size_t total_size)
 int Wifi_ProcessReceivedFrame(int base, int length)
 {
     (void)length;
-    return (Wifi_MACReadHWord(base, HDR_RX_SIZE) & FC_TYPE_SUBTYPE_MASK) == TYPE_DATA
+    return Wifi_IsDataPayloadFrame(Wifi_MACReadHWord(base, HDR_RX_SIZE))
            ? WFLAG_PACKET_DATA : 0;
 }
 
@@ -91,11 +91,12 @@ static size_t wire_frame(u8 *frame, bool group, u64 pn, size_t payload_size)
         payload[10] = (payload_size - 8) >> 8;
         payload[11] = payload_size - 8;
     }
-    u8 aad[22], nonce[13];
-    make_ccmp_aad(frame, aad);
+    u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE], nonce[13];
+    const size_t aad_len = make_ccmp_aad(frame, aad);
     make_ccmp_nonce(frame, frame + 24, nonce);
-    CHECK(Wifi_NTR_CcmpEncrypt(group ? wpa_gtk.key : expected_ptk + 32,
-        nonce, aad, payload, payload_size, frame + 32, frame + 32 + payload_size));
+    CHECK(Wifi_NTR_CcmpEncryptAad(group ? wpa_gtk.key : expected_ptk + 32,
+        nonce, aad, aad_len, payload, payload_size, frame + 32,
+        frame + 32 + payload_size));
     return 40 + payload_size;
 }
 
@@ -146,7 +147,7 @@ static void test_uncommitted_length(void)
             Wifi_RxQueueFlush();
             CHECK(queue_syncs == 1);
             CHECK(wifi.stats[WSTAT_NTR_CCMP_VALID] == 1);
-            CHECK(wpa_pairwise_rx_pn == 1);
+            CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 1);
             CHECK(wifi.stats[WSTAT_NTR_RX_FCS_BOUNDARY] == 1);
             CHECK(wifi.stats[WSTAT_NTR_RX_REPORTED_SIZE] == reported[stale]);
             CHECK(wifi.stats[WSTAT_NTR_RX_FRAME_SIZE] == length);
@@ -180,7 +181,8 @@ static void test_no_fcs_and_bad_mic(void)
         CHECK(wifi.stats[WSTAT_NTR_RX_FCS_BOUNDARY] == 1);
         CHECK(wifi.stats[WSTAT_NTR_CCMP_MIC_FAILED] == 1);
         CHECK(wifi.stats[WSTAT_NTR_CCMP_VALID] == 0);
-        CHECK(wpa_pairwise_rx_pn == 0 && wpa_group_rx_pn == 0);
+        CHECK(all_zero(wpa_pairwise_rx_pn, sizeof(wpa_pairwise_rx_pn)) &&
+              all_zero(wpa_group_rx_pn, sizeof(wpa_group_rx_pn)));
     }
 }
 
@@ -250,6 +252,33 @@ static void test_recovery(void)
     }
 }
 
+static void test_qos_recovery(void)
+{
+    const u8 payload[343] = {
+        0xaa, 0xaa, 3, 0, 0, 0, 8, 0, 0x45
+    };
+    u8 frame[1024];
+    for (unsigned group = 0; group <= 1; ++group) {
+        const u8 tid = group ? 7 : 5;
+        ready_radio(MAC_RXBUF_START_OFFSET);
+        const size_t length = make_qos_frame(frame, group, tid, 1,
+                                              payload, sizeof(payload));
+        CHECK(length == 42 + sizeof(payload));
+        store_tail_with_fcs(frame, length, 187);
+        Wifi_RxQueueFlush();
+        CHECK(queue_syncs == 1);
+        CHECK(wifi.stats[WSTAT_NTR_RX_RAM_CANDIDATES] == 1);
+        CHECK(wifi.stats[WSTAT_NTR_CCMP_VALID] == 1);
+        CHECK(wpa_pairwise_rx_pn[tid] == (group ? 0 : 1));
+        CHECK(wpa_group_rx_pn[tid] == (group ? 1 : 0));
+        const u8 *queued = (const u8 *)wifi.rxbufData;
+        CHECK(read_u32(queued) == 26 + sizeof(payload));
+        CHECK(queued[4 + 24] == (tid | 0xA0));
+        CHECK(memcmp(queued + 4 + 26, payload, sizeof(payload)) == 0);
+        CHECK(!(queued[4 + 1] & 0x40));
+    }
+}
+
 static void test_rejection(void)
 {
     u8 frame[1024];
@@ -259,14 +288,14 @@ static void test_rejection(void)
     store_tail(frame, length);
     Wifi_RxQueueFlush();
     CHECK(queue_syncs == 0);
-    CHECK(wpa_pairwise_rx_pn == 0);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 0);
     CHECK(wifi.stats[WSTAT_NTR_CCMP_MIC_FAILED] == 1);
     // A later complete/valid image must be retried, not blocked by the cache.
     frame[length - 1] ^= 1;
     store_tail(frame, length);
     Wifi_RxQueueFlush();
     CHECK(queue_syncs == 1);
-    CHECK(wpa_pairwise_rx_pn == 1);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 1);
 
     ready_radio(MAC_RXBUF_START_OFFSET);
     length = wire_frame(frame, false, 1, 344);
@@ -275,7 +304,7 @@ static void test_rejection(void)
     Wifi_RxQueueFlush();
     CHECK(queue_syncs == 0);
     CHECK(wifi.stats[WSTAT_NTR_RX_RAM_CANDIDATES] == 0);
-    CHECK(wpa_pairwise_rx_pn == 0);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 0);
 
     for (unsigned guard = 0; guard < 6; ++guard) {
         ready_radio(MAC_RXBUF_START_OFFSET);
@@ -310,9 +339,61 @@ static void test_rejection(void)
     queue_full = true;
     Wifi_RxQueueFlush();
     CHECK(queue_syncs == 0);
-    CHECK(wifi.stats[WSTAT_RXQUEUEDLOST] == 1);
+    CHECK(wifi.stats[WSTAT_RXQUEUEDLOST] == 0);
+    CHECK(wifi.stats[WSTAT_NTR_RX_BACKPRESSURE] == 1);
     CHECK(W_RXBUF_WRCSR == MAC_RXBUF_START_OFFSET / 2);
     CHECK(W_RXBUF_READCSR == MAC_RXBUF_START_OFFSET / 2);
+    // Backpressure must not consume the replay number or cache this frame as
+    // handled. It is still intact in MAC RAM and must be deliverable once the
+    // ARM9 drains its queue, without requiring another radio transmission.
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 0);
+    queue_full = false;
+    Wifi_RxQueueFlush();
+    CHECK(queue_syncs == 1);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 1);
+    Wifi_RxQueueFlush();
+    CHECK(queue_syncs == 1);
+    CHECK(wifi.stats[WSTAT_NTR_CCMP_VALID] == 1);
+
+    // The committed receive path must also leave both the hardware cursor
+    // and replay state untouched while the ARM9 has no room.
+    ready_radio(MAC_RXBUF_START_OFFSET);
+    length = wire_frame(frame, false, 1, 344);
+    store_tail(frame, length);
+    const u32 next = (MAC_RXBUF_START_OFFSET + HDR_RX_SIZE + round_up_32(length)) / 2;
+    W_RXBUF_WRCSR = next;
+    queue_full = true;
+    Wifi_RxQueueFlush();
+    CHECK(queue_syncs == 0);
+    CHECK(W_RXBUF_READCSR == MAC_RXBUF_START_OFFSET / 2);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 0);
+    queue_full = false;
+    Wifi_RxQueueFlush();
+    CHECK(queue_syncs == 1);
+    CHECK(W_RXBUF_READCSR == next);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 1);
+}
+
+static void test_authenticated_tcp_diagnostics(void)
+{
+    ready_radio(MAC_RXBUF_START_OFFSET);
+    u8 payload[8 + 20 + 20 + 64] = {0xAA, 0xAA, 3, 0, 0, 0, 8, 0};
+    u8 *ip = payload + 8, *tcp = ip + 20;
+    ip[0] = 0x45; ip[3] = sizeof(payload) - 8; ip[9] = 6;
+    tcp[0] = 40992 >> 8; tcp[1] = 40992 & 255;
+    tcp[2] = 65000 >> 8; tcp[3] = 65000 & 255;
+    tcp[4] = 0x12; tcp[5] = 0x34; tcp[6] = 0x56; tcp[7] = 0x78;
+    tcp[12] = 0x50; tcp[13] = 0x18;
+    u8 frame[1024];
+    const size_t length = make_qos_frame(frame, false, 5, 1, payload, sizeof(payload));
+    store_tail_with_fcs(frame, length, 187);
+    Wifi_RxQueueFlush();
+    CHECK(queue_syncs == 1);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_RADIO_PACKETS] == 1);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_RADIO_SEQ] == 0x12345678);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_RADIO_BYTES] == 64);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_LOCAL_PORT] == 65000);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_REMOTE_PORT] == 40992);
 }
 
 int main(void)
@@ -320,10 +401,12 @@ int main(void)
     if (wpa_fixture_tests()) return 1;
     unsigned previous = checks;
     test_recovery();
+    test_qos_recovery();
     test_rejection();
     test_uncommitted_length();
     test_no_fcs_and_bad_mic();
     test_prefix_boundaries();
+    test_authenticated_tcp_diagnostics();
     printf("NTR rejected-RAM RX: %u checks, %u failures (simulated hardware)\n",
            checks - previous, failures);
     return failures ? 1 : 0;

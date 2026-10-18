@@ -25,7 +25,8 @@ int main(int argc, char **argv) {
   online.visible = online.connected = online.ipv4Ready = true;
   online.ssid = "TestNetwork";
   online.ip = "10.0.0.25";
-  online.internet = chestlink::InternetAccess::reachable;
+  online.serverIP = "10.0.0.9";
+  online.server = chestlink::ServerAvailability::connected;
   gui::setNetworkStatus(online);
   gui::BoxScreen s;
   s.bank = "SoulSilver";
@@ -70,7 +71,8 @@ int main(int argc, char **argv) {
   gui::menu(heading, options, 0, "IP 10.0.0.25 PIN 123456");
   save(prefix + "-wifi-online.ppm", gui::topPixels(), gui::TOP_WIDTH);
   online.ipv4Ready = false; online.ip.clear();
-  online.internet = chestlink::InternetAccess::unknown;
+  online.serverIP.clear();
+  online.server = chestlink::ServerAvailability::unknown;
   gui::setNetworkStatus(online);
   gui::menu(heading, options, 0, "Aguardando IP da rede atual");
   save(prefix + "-wifi-dhcp.ppm", gui::topPixels(), gui::TOP_WIDTH);

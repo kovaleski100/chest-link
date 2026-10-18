@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <thread>
@@ -154,6 +155,44 @@ NetworkResult transfer(const Store &dst, const Package &p,
 int main() {
   std::cout.setf(std::ios::unitbuf);
   try {
+    test("Update trace sends a bounded redacted UDP record", [] {
+      int receiver = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      require(receiver >= 0, "create UDP trace receiver");
+      sockaddr_in address{};
+      address.sin_family = AF_INET;
+      address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      require(bind(receiver, reinterpret_cast<sockaddr *>(&address),
+                   sizeof(address)) == 0,
+              "bind UDP trace receiver");
+      socklen_t size = sizeof(address);
+      require(getsockname(receiver, reinterpret_cast<sockaddr *>(&address),
+                          &size) == 0,
+              "read UDP trace port");
+      const std::string record =
+          "{\"event\":\"download_progress\",\"radio\":\"security=WPA2\"}";
+      int sender = -1;
+      require(sendUpdateTrace(sender, "127.0.0.1", ntohs(address.sin_port),
+                              record),
+              "send first UDP trace record");
+      const int reused = sender;
+      require(sendUpdateTrace(sender, "127.0.0.1", ntohs(address.sin_port),
+                              record),
+              "send second UDP trace record");
+      require(sender == reused, "reuse the UDP socket for later records");
+      char packet[1200]{};
+      const ssize_t received = recv(receiver, packet, sizeof(packet), 0);
+      const ssize_t receivedAgain = recv(receiver, packet, sizeof(packet), 0);
+      closeUpdateTraceSocket(sender);
+      Connection::close(receiver);
+      require(received == static_cast<ssize_t>(record.size() + 8),
+              "receive first complete UDP trace packet");
+      require(receivedAgain == static_cast<ssize_t>(record.size() + 8),
+              "receive second complete UDP trace packet");
+      require(std::string(packet, 8) == "CLUPDLOG" &&
+                  std::string(packet + 8, record.size()) == record,
+              "trace magic and JSON record preserved");
+      require(sender == -1, "close and clear the UDP trace socket");
+    });
     test("SHA-256 standard vectors and chunk boundaries", [] {
       require(hex(hash("")) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934"
                                "ca495991b7852b855",

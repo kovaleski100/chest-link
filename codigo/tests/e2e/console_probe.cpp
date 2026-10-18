@@ -72,6 +72,22 @@ Digest hashFile(const std::string &path) {
   if (bad) throw Error("Probe file read failed.");
   return sha.finish();
 }
+Progress updateProgress() {
+  auto previous = std::make_shared<uint32_t>(UINT32_MAX);
+  return [previous](uint32_t done, uint32_t total) {
+    const int percent = total ? static_cast<int>(uint64_t(done) * 100 / total) : 0;
+    number("downloaded_bytes", done);
+    number("download_total_bytes", total);
+    if (done != *previous) {
+      *previous = done;
+      gui::notice("Baixando atualizacao",
+                  std::to_string(done) + " / " + std::to_string(total),
+                  "B: cancelar", percent);
+    }
+    platform::frame();
+    return platform::alive() && !(platform::keys() & platform::B);
+  };
+}
 void inspect(const Store &store, const BankInfo &info) {
   Bank bank(store, info);
   unsigned occupied = 0, valid = 0;
@@ -204,6 +220,31 @@ int runApp() {
         auto connection = Connection::connect(getText("ip"), port, 15000);
         auto wire = connection.wire();
         makeDirs(root + "/install");
+        const auto manualUpdate = config.object.find("manual_update");
+        const bool useUpdatePrompt = manualUpdate != config.object.end() &&
+                                     manualUpdate->second.number != 0;
+        auto acceptUpdate = [useUpdatePrompt](uint32_t version, uint32_t bytes,
+                                              uint32_t local) {
+          if (!useUpdatePrompt) return true;
+          stage("update_offer");
+          gui::notice("Atualizacao disponivel",
+                      "Versao instalada: " + appVersionText(local) +
+                          "\nNova versao: " + appVersionText(version) +
+                          "\nTamanho: " + std::to_string(bytes / 1024) + " KiB",
+                      "A: aceitar    B: cancelar");
+          for (;;) {
+            platform::frame();
+            const unsigned keys = platform::keys();
+            if (keys & platform::B) {
+              stage("update_declined");
+              return false;
+            }
+            if (keys & platform::A) {
+              stage("update_accepted");
+              return true;
+            }
+          }
+        };
 #ifdef CL_NDS
         const std::string path = root + "/install/ChestLink_DS.nds";
         auto update = updateNDS(wire, pin, getNumber("installed_version"), path,
@@ -212,7 +253,8 @@ int runApp() {
         const std::string previousHash = hex(hashFile(path));
         auto update = update3DS(wire, pin, getNumber("installed_version"), path,
 #endif
-                                [](uint32_t, uint32_t, uint32_t) { return true; });
+                                acceptUpdate,
+                                updateProgress());
         number("update_state", static_cast<uint32_t>(update.state));
         number("update_version", update.version); number("update_bytes", update.bytes);
         if (update.state == UpdateState::installed) text("installed_sha256", hex(hashFile(path)));

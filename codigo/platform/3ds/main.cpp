@@ -175,6 +175,10 @@ std::vector<chestlink::Store> stores() {
                    {}});
   return out;
 }
+std::vector<std::string> gameSaveSearchRoots() {
+  return {"sdmc:/3ds/PKSM", "sdmc:/3ds/Checkpoint", "sdmc:/gm9/out",
+          "sdmc:/roms", "sdmc:/saves", "sdmc:/pokemon", "sdmc:/"};
+}
 void network() {
   platform_detail::require3DSNetwork();
 }
@@ -185,6 +189,12 @@ std::string ip() {
   platform_detail::refresh3DSNetworkStatus(true);
   const auto &status = networkStatus();
   return status.ipv4Ready ? status.ip : "0.0.0.0";
+}
+std::string updateNetworkDiagnostics() {
+  const auto &status = networkStatus();
+  return std::string("driver=3DS-native connected=") +
+         (status.connected ? "yes" : "no") +
+         " ipv4_ready=" + (status.ipv4Ready ? "yes" : "no");
 }
 } // namespace platform
 int runApp();

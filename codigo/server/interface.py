@@ -341,11 +341,20 @@ class Interface:
 
     @staticmethod
     def empty_dex_state():
-        return dict(version=3, mode="unified", unified=[], legacyGreen=[], serverCaptured=[],
-                    individual={game: [] for game in ("red", "blue", "yellow")})
+        return dict(version=6, mode="unified", unified=[], johtoUnified=[], generation3Unified=[],
+                    generation4Unified=[], legacyGreen=[], serverCaptured=[], johtoServerCaptured=[],
+                    hoennServerCaptured=[], sinnohServerCaptured=[],
+                    individual={game: [] for game in ("red", "blue", "yellow")},
+                    johtoIndividual={game: [] for game in ("gold", "silver", "crystal")},
+                    generation3Individual={game: [] for game in
+                                            ("firered", "leafgreen", "ruby", "sapphire", "emerald")},
+                    generation4Individual={game: [] for game in
+                                            ("diamond", "pearl", "platinum", "heartgold", "soulsilver")})
 
-    def pokedex_catalog(self):
-        data = json.loads((WEB / "assets/dex-gen1.json").read_text(encoding="utf-8"))
+    def pokedex_catalog(self, generation=1):
+        if type(generation) is not int or generation not in (1, 2, 3, 4):
+            raise self.core.MailboxError("Geração da Pokédex inválida.")
+        data = json.loads((WEB / f"assets/dex-gen{generation}.json").read_text(encoding="utf-8"))
         detailed = {row["id"]: row for row in data["species"]}
         species = []
         for species_id in pokemon.national_species_ids():
@@ -357,14 +366,17 @@ class Interface:
                            exclusiveTo=None, unobtainableIn=[], encounters={},
                            pokemonDb=None, evolutionChain=None, detailed=False)
             species.append(row)
-        region = data["region"]
+        regions = data.get("regions", [data["region"]] if "region" in data else [])
         ids = {row["id"] for row in species}
-        regional_ids = [row["id"] for row in data["species"] if row["id"] in ids]
+        regions = [dict(region, speciesIds=[species_id for species_id in region.get(
+            "speciesIds", [row["id"] for row in data["species"]]) if species_id in ids],
+            games=[game["id"] for game in data["games"] if game["id"] in
+                   region.get("games", [item["id"] for item in data["games"]])])
+            for region in regions]
         national_ids = pokemon.national_species_ids_for_generation(data["generation"])
         return dict(data, species=species, nationalSpeciesIds=national_ids,
                     nationalSpeciesTotal=len(national_ids),
-                    regions=[dict(region, speciesIds=regional_ids,
-                    games=[game["id"] for game in data["games"]])])
+                    regions=regions)
 
     def read_dex_state(self):
         try:
@@ -372,30 +384,111 @@ class Interface:
                               object_pairs_hook=self.core.no_duplicates)
         except FileNotFoundError:
             return self.empty_dex_state()
+        migrated = False
         if (not isinstance(data, dict) or data.get("mode") not in ("unified", "individual") or
                 not isinstance(data.get("unified"), list) or not isinstance(data.get("individual"), dict)):
             raise self.core.MailboxError("Arquivo de progresso da Pokedex invalido; os dados foram preservados.")
+        games1 = ("red", "blue", "yellow")
+        games2 = ("gold", "silver", "crystal")
+        games3 = ("firered", "leafgreen", "ruby", "sapphire", "emerald")
+        games4 = ("diamond", "pearl", "platinum", "heartgold", "soulsilver")
+        legacy_individual = {"red", "blue", "yellow", "green"}
         if (data.get("version") == 1 and set(data) == {"version", "mode", "unified", "individual"} and
-                set(data["individual"]) == {"red", "green", "blue", "yellow"}):
-            data = dict(version=3, mode=data["mode"], unified=data["unified"],
-                        individual={game: data["individual"][game] for game in ("red", "blue", "yellow")},
-                        legacyGreen=data["individual"]["green"], serverCaptured=[])
+                set(data.get("individual", {})) == legacy_individual):
+            migrated_data = self.empty_dex_state()
+            migrated_data.update(mode=data["mode"], unified=data["unified"],
+                                 legacyGreen=data["individual"]["green"])
+            migrated_data["individual"] = {game: data["individual"][game] for game in games1}
+            data = migrated_data
+            migrated = True
         elif (data.get("version") == 2 and
               set(data) == {"version", "mode", "unified", "individual", "legacyGreen"} and
-              set(data["individual"]) == {"red", "blue", "yellow"}):
-            data = dict(version=3, mode=data["mode"], unified=data["unified"],
-                        individual=data["individual"], legacyGreen=data["legacyGreen"], serverCaptured=[])
-        elif (data.get("version") != 3 or
-              set(data) != {"version", "mode", "unified", "individual", "legacyGreen", "serverCaptured"} or
-              set(data["individual"]) != {"red", "blue", "yellow"}):
+              set(data.get("individual", {})) == set(games1)):
+            migrated_data = self.empty_dex_state()
+            migrated_data.update(mode=data["mode"], unified=data["unified"],
+                                 individual=data["individual"], legacyGreen=data["legacyGreen"])
+            data = migrated_data
+            migrated = True
+        elif (data.get("version") == 3 and
+              set(data) == {"version", "mode", "unified", "individual", "legacyGreen", "serverCaptured"} and
+              set(data.get("individual", {})) == set(games1)):
+            migrated_data = self.empty_dex_state()
+            old_server = data["serverCaptured"]
+            if (not isinstance(old_server, list) or
+                    any(type(value) is not int or not 1 <= value <= 251 for value in old_server) or
+                    len(old_server) != len(set(old_server))):
+                raise self.core.MailboxError("Progresso da Pokedex invalido; os dados foram preservados.")
+            migrated_data.update(mode=data["mode"], unified=data["unified"],
+                                 individual=data["individual"], legacyGreen=data["legacyGreen"],
+                                 serverCaptured=[value for value in old_server if value <= 151],
+                                 johtoServerCaptured=old_server)
+            data = migrated_data
+            migrated = True
+        elif data.get("version") == 4:
+            base_keys = {"version", "mode", "unified", "johtoUnified", "individual",
+                         "johtoIndividual", "legacyGreen", "serverCaptured"}
+            if set(data) == base_keys:
+                data = dict(data, johtoServerCaptured=data["serverCaptured"])
+            elif set(data) != base_keys | {"johtoServerCaptured"}:
+                raise self.core.MailboxError("Arquivo de progresso da Pokedex invalido; os dados foram preservados.")
+            old_server = data.get("serverCaptured")
+            johto_server = data.get("johtoServerCaptured")
+            if (set(data.get("individual", {})) != set(games1) or
+                    set(data.get("johtoIndividual", {})) != set(games2) or
+                    not isinstance(old_server, list) or not isinstance(johto_server, list) or
+                    any(type(value) is not int or not 1 <= value <= 251 for value in old_server) or
+                    any(type(value) is not int or not 1 <= value <= 251 for value in johto_server) or
+                    len(old_server) != len(set(old_server)) or len(johto_server) != len(set(johto_server))):
+                raise self.core.MailboxError("Progresso da Pokedex invalido; os dados foram preservados.")
+            data = dict(data, version=6,
+                        serverCaptured=[value for value in old_server if value <= 151],
+                        johtoServerCaptured=sorted(set(johto_server) | set(old_server)),
+                        generation3Unified=[],
+                        generation3Individual={game: [] for game in games3},
+                        hoennServerCaptured=[], generation4Unified=[],
+                        generation4Individual={game: [] for game in games4},
+                        sinnohServerCaptured=[])
+            migrated = True
+        elif (data.get("version") == 5 and
+              set(data) == {"version", "mode", "unified", "johtoUnified", "generation3Unified",
+                            "individual", "johtoIndividual", "generation3Individual", "legacyGreen",
+                            "serverCaptured", "johtoServerCaptured", "hoennServerCaptured"} and
+              set(data.get("individual", {})) == set(games1) and
+              set(data.get("johtoIndividual", {})) == set(games2) and
+              set(data.get("generation3Individual", {})) == set(games3)):
+            data = dict(data, version=6, generation4Unified=[],
+                        generation4Individual={game: [] for game in games4},
+                        sinnohServerCaptured=[])
+            migrated = True
+        elif (data.get("version") != 6 or
+              set(data) != {"version", "mode", "unified", "johtoUnified", "generation3Unified",
+                            "generation4Unified", "individual", "johtoIndividual", "generation3Individual",
+                            "generation4Individual", "legacyGreen", "serverCaptured", "johtoServerCaptured",
+                            "hoennServerCaptured", "sinnohServerCaptured"} or
+              set(data.get("individual", {})) != set(games1) or
+              set(data.get("johtoIndividual", {})) != set(games2) or
+              set(data.get("generation3Individual", {})) != set(games3) or
+              set(data.get("generation4Individual", {})) != set(games4)):
             raise self.core.MailboxError("Arquivo de progresso da Pokedex invalido; os dados foram preservados.")
         if not isinstance(data.get("legacyGreen"), list):
             raise self.core.MailboxError("Progresso legado da Pokedex invalido; os dados foram preservados.")
-        for values in [data["unified"], data["legacyGreen"], data["serverCaptured"], *data["individual"].values()]:
-            if (not isinstance(values, list) or any(type(value) is not int or not 1 <= value <= 151
-                                                   for value in values) or
-                    len(values) != len(set(values))):
+        collections = [
+            (data["unified"], 151), (data["legacyGreen"], 151),
+            (data["serverCaptured"], 151), (data["johtoServerCaptured"], 251),
+            (data["hoennServerCaptured"], 386), (data["sinnohServerCaptured"], 493),
+            *((values, 151) for values in data["individual"].values()),
+            (data["johtoUnified"], 251),
+            *((values, 251) for values in data["johtoIndividual"].values()),
+            (data["generation3Unified"], 386),
+            *((values, 386) for values in data["generation3Individual"].values()),
+            (data["generation4Unified"], 493),
+            *((values, 493) for values in data["generation4Individual"].values())]
+        for values, maximum in collections:
+            if (not isinstance(values, list) or any(type(value) is not int or not 1 <= value <= maximum
+                                                   for value in values) or len(values) != len(set(values))):
                 raise self.core.MailboxError("Progresso da Pokedex invalido; os dados foram preservados.")
+        if migrated:
+            self.core.atomic_json(self.dex_state_file, data)
         return data
 
     def mark_server_captured(self, folder, offer):
@@ -407,48 +500,76 @@ class Interface:
                 if len(entry) != 336:
                     raise self.core.MailboxError("Copia incompleta ao marcar capturas da Pokedex.")
                 summary = pokemon.preview(entry)
-                if summary["valid"] and 1 <= summary["species"] <= 151:
+                if summary["valid"] and 1 <= summary["species"] <= 493:
                     species.add(summary["species"])
         if not species:
             return
         with self.dex_lock:
             data = self.read_dex_state()
-            captured = sorted(set(data["serverCaptured"]) | species)
-            if captured != data["serverCaptured"]:
-                data["serverCaptured"] = captured
+            kanto_captured = sorted(set(data["serverCaptured"]) | {species_id for species_id in species
+                                                                     if species_id <= 151})
+            johto_captured = sorted(set(data["johtoServerCaptured"]) |
+                                    {species_id for species_id in species if species_id <= 251})
+            hoenn_captured = sorted(set(data["hoennServerCaptured"]) |
+                                    {species_id for species_id in species if species_id <= 386})
+            sinnoh_captured = sorted(set(data["sinnohServerCaptured"]) |
+                                     {species_id for species_id in species if species_id <= 493})
+            if (kanto_captured != data["serverCaptured"] or
+                    johto_captured != data["johtoServerCaptured"] or
+                    hoenn_captured != data["hoennServerCaptured"] or
+                    sinnoh_captured != data["sinnohServerCaptured"]):
+                data["serverCaptured"] = kanto_captured
+                data["johtoServerCaptured"] = johto_captured
+                data["hoennServerCaptured"] = hoenn_captured
+                data["sinnohServerCaptured"] = sinnoh_captured
                 self.core.atomic_json(self.dex_state_file, data)
 
     def update_pokedex(self, request):
-        games = ("red", "blue", "yellow")
+        kanto_games = ("red", "blue", "yellow")
+        johto_games = ("gold", "silver", "crystal")
+        hoenn_games = ("firered", "leafgreen", "ruby", "sapphire", "emerald")
+        sinnoh_games = ("diamond", "pearl", "platinum", "heartgold", "soulsilver")
+        games = kanto_games + johto_games + hoenn_games + sinnoh_games
+        game_group = {**{game: ("unified", "individual", kanto_games, 151) for game in kanto_games},
+                      **{game: ("johtoUnified", "johtoIndividual", johto_games, 251) for game in johto_games},
+                      **{game: ("generation3Unified", "generation3Individual", hoenn_games, 386)
+                         for game in hoenn_games},
+                      **{game: ("generation4Unified", "generation4Individual", sinnoh_games, 493)
+                         for game in sinnoh_games}}
         if (not isinstance(request, dict) or set(request) != {"mode", "game", "species", "captured"} or
                 request["mode"] not in ("unified", "individual") or request["game"] not in games or
-                type(request["species"]) is not int or not 1 <= request["species"] <= 151 or
+                type(request["species"]) is not int or not 1 <= request["species"] <= game_group.get(
+                    request.get("game"), (None, None, None, 0))[3] or
                 type(request["captured"]) is not bool):
             raise self.core.MailboxError("Atualizacao da Pokedex invalida.")
         with self.dex_lock:
             data = self.read_dex_state()
             if data["mode"] != request["mode"]:
-                if request["mode"] == "unified":
-                    data["unified"] = sorted({species for values in data["individual"].values()
-                                              for species in values})
-                    for game in games:
-                        data["individual"][game] = list(data["unified"])
-                else:
-                    for game in games:
-                        data["individual"][game] = list(data["unified"])
+                for unified_key, individual_key, group_games in (
+                        ("unified", "individual", kanto_games),
+                        ("johtoUnified", "johtoIndividual", johto_games),
+                        ("generation3Unified", "generation3Individual", hoenn_games),
+                        ("generation4Unified", "generation4Individual", sinnoh_games)):
+                    if request["mode"] == "unified":
+                        data[unified_key] = sorted({species for values in data[individual_key].values()
+                                                    for species in values})
+                    else:
+                        for game in group_games:
+                            data[individual_key][game] = list(data[unified_key])
                 data["mode"] = request["mode"]
-            collection = set(data["unified"] if data["mode"] == "unified"
-                             else data["individual"][request["game"]])
+            unified_key, individual_key, group_games, _maximum = game_group[request["game"]]
+            collection = set(data[unified_key] if data["mode"] == "unified"
+                             else data[individual_key][request["game"]])
             if request["captured"]:
                 collection.add(request["species"])
             else:
                 collection.discard(request["species"])
             if data["mode"] == "unified":
-                data["unified"] = sorted(collection)
-                for game in games:
-                    data["individual"][game] = list(data["unified"])
+                data[unified_key] = sorted(collection)
+                for game in group_games:
+                    data[individual_key][game] = list(data[unified_key])
             else:
-                data["individual"][request["game"]] = sorted(collection)
+                data[individual_key][request["game"]] = sorted(collection)
             self.core.atomic_json(self.dex_state_file, data)
         return self.pokedex()
 
@@ -485,16 +606,40 @@ class Interface:
             for species_id, count in species_counts.items():
                 home_counts[species_id] = home_counts.get(species_id, 0) + count
         counts = {species_id: count for species_id, count in home_counts.items() if species_id <= 151}
+        johto_counts = {species_id: count for species_id, count in home_counts.items() if species_id <= 251}
+        hoenn_counts = {species_id: count for species_id, count in home_counts.items() if species_id <= 386}
+        sinnoh_counts = {species_id: count for species_id, count in home_counts.items() if species_id <= 493}
         with self.dex_lock:
             progress = self.read_dex_state()
             captured = sorted(set(progress["serverCaptured"]) | set(counts))
-            if captured != progress["serverCaptured"]:
+            johto_captured = sorted(set(progress["johtoServerCaptured"]) | set(johto_counts))
+            hoenn_captured = sorted(set(progress["hoennServerCaptured"]) | set(hoenn_counts))
+            sinnoh_captured = sorted(set(progress["sinnohServerCaptured"]) | set(sinnoh_counts))
+            if (captured != progress["serverCaptured"] or johto_captured != progress["johtoServerCaptured"] or
+                    hoenn_captured != progress["hoennServerCaptured"] or
+                    sinnoh_captured != progress["sinnohServerCaptured"]):
                 progress["serverCaptured"] = captured
+                progress["johtoServerCaptured"] = johto_captured
+                progress["hoennServerCaptured"] = hoenn_captured
+                progress["sinnohServerCaptured"] = sinnoh_captured
                 self.core.atomic_json(self.dex_state_file, progress)
         return dict(mode=progress["mode"], unified=progress["unified"],
-                    individual=progress["individual"], serverCounts=counts,
+                    individual=progress["individual"], johtoUnified=progress["johtoUnified"],
+                    johtoIndividual=progress["johtoIndividual"],
+                    generation3Unified=progress["generation3Unified"],
+                    generation3Individual=progress["generation3Individual"],
+                    generation4Unified=progress["generation4Unified"],
+                    generation4Individual=progress["generation4Individual"], serverCounts=counts,
+                    johtoServerCounts=johto_counts, hoennServerCounts=hoenn_counts,
                     serverCaptured=progress["serverCaptured"], homeServerCounts=home_counts,
-                    homeServerCaptured=sorted(set(progress["serverCaptured"]) | set(home_counts)),
+                    johtoServerCaptured=progress["johtoServerCaptured"],
+                    hoennServerCaptured=progress["hoennServerCaptured"],
+                    sinnohServerCounts=sinnoh_counts,
+                    sinnohServerCaptured=progress["sinnohServerCaptured"],
+                    homeServerCaptured=sorted(set(progress["serverCaptured"]) |
+                                              set(progress["johtoServerCaptured"]) |
+                                              set(progress["hoennServerCaptured"]) |
+                                              set(progress["sinnohServerCaptured"]) | set(home_counts)),
                     homeSpeciesTotal=len(pokemon.national_species_ids()))
 
     def requeue(self, request):
@@ -655,7 +800,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif url.path == "/api/pokedex":
                     self.send(200, interface.pokedex())
                 elif url.path == "/api/pokedex/catalog":
-                    self.send(200, interface.pokedex_catalog())
+                    args = parse_qs(url.query, strict_parsing=bool(url.query))
+                    if set(args) - {"generation"} or any(len(values) != 1 for values in args.values()):
+                        raise interface.core.MailboxError("Pedido de geração da Pokédex inválido.")
+                    generation = int(args.get("generation", ["1"])[0])
+                    self.send(200, interface.pokedex_catalog(generation))
                 elif url.path == "/api/box":
                     args = parse_qs(url.query, strict_parsing=True)
                     if set(args) != {"id", "box"} or any(len(v) != 1 for v in args.values()):
@@ -687,11 +836,11 @@ class Handler(BaseHTTPRequestHandler):
             relative = "index.html" if url.path == "/" else url.path.lstrip("/")
             if relative not in {"index.html", "app.js", "style.css", "dex.css", "native-saves.css"} and not (
                     relative.startswith("assets/") and relative.count("/") == 1 and
-                    relative[7:] in {p.name for p in (WEB / "assets").iterdir() if p.suffix in (".png", ".json")}):
+                    relative[7:] in {p.name for p in (WEB / "assets").iterdir() if p.suffix in (".png", ".jpg", ".json")}):
                 self.send(404, dict(error="Arquivo nao encontrado."))
                 return
             mime = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                    ".css": "text/css; charset=utf-8", ".png": "image/png", ".json": "application/json"}
+                    ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".json": "application/json"}
             self.send(200, (WEB / relative).read_bytes(), mime[Path(relative).suffix])
         except (interface.core.MailboxError, native_saves.NativeSaveError, OSError,
                 ValueError, KeyError, TypeError, RecursionError) as exc:
@@ -716,8 +865,14 @@ class Handler(BaseHTTPRequestHandler):
                 if len(data) != length:
                     raise interface.core.MailboxError("Upload incompleto; o save nao foi importado.")
                 filename = _safe_http_filename(unquote(self.headers.get("X-Filename", "save.bin")))
+                game_hint = self.headers.get("X-Game")
+                if game_hint is not None and game_hint not in {
+                        "red", "blue", "yellow", "gold", "silver", "crystal",
+                        "firered", "leafgreen", "ruby", "sapphire", "emerald",
+                        "diamond", "pearl", "platinum", "heartgold", "soulsilver"}:
+                    raise interface.core.MailboxError("Jogo selecionado para importação inválido.")
                 result = interface.native_saves.import_bytes(data, filename=filename,
-                                                              locator="upload PC")
+                                                              locator="upload PC", game_hint=game_hint)
                 self.send(200, result)
                 return
             length = int(self.headers.get("Content-Length", "0"))
@@ -728,7 +883,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(data) != length:
                 raise interface.core.MailboxError("Pedido incompleto.")
             request = json.loads(data, object_pairs_hook=interface.core.no_duplicates)
-            if self.path not in {"/api/requeue", "/api/send-direct", "/api/clear-pending", "/api/pokedex", "/api/hotspot", "/api/native-saves/journey", "/api/organize"}:
+            if self.path not in {"/api/requeue", "/api/send-direct", "/api/clear-pending", "/api/pokedex", "/api/hotspot", "/api/native-saves/journey", "/api/native-saves/delete", "/api/organize"}:
                 self.send(404, dict(error="Acao nao encontrada."))
                 return
             if self.path == "/api/hotspot":
@@ -747,6 +902,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = interface.update_pokedex(request)
             elif self.path == "/api/native-saves/journey":
                 result = interface.native_saves.add_manual_event(request)
+            elif self.path == "/api/native-saves/delete":
+                if (not isinstance(request, dict) or set(request) != {"sha256"} or
+                        not isinstance(request["sha256"], str)):
+                    raise interface.core.MailboxError("Selecione um save Native Saves valido para remover.")
+                result = interface.native_saves.delete_save(request["sha256"])
             elif self.path == "/api/organize":
                 with interface.action_lock:
                     result = interface.organize(request)

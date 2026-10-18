@@ -19,8 +19,128 @@ ROOT = Path(__file__).resolve().parents[1]
 CLI = Path(os.environ.get("CHEST_LINK_CLI", ROOT / "build/chest-link-cli"))
 PROBE = Path(os.environ.get("CHEST_LINK_PROBE", ROOT / "build/mailbox-probe"))
 UPDATE_PROBE = Path(os.environ.get("CHEST_LINK_UPDATE_PROBE", ROOT / "build/update-probe"))
+DISCOVERY_PROBE = Path(os.environ.get("CHEST_LINK_DISCOVERY_PROBE", ROOT / "build/discovery-probe"))
 PIN = 123456
 logging.getLogger("chest-link").setLevel(logging.CRITICAL)
+
+
+class DSUpdateFlowTests(unittest.TestCase):
+    class RadioSocket:
+        """A receiver whose current frame is lost if the sender queues another.
+
+        TCP_INFO first reports queued bytes, then a segment awaiting ACK, then
+        delivery. This models the NTR limitation without claiming radio tests.
+        """
+        family = socket.AF_INET
+
+        def __init__(self, stalled=False, tcp_info=True):
+            self.timeout = 2
+            self.nodelay = 0
+            self.started = False
+            self.pending = 0
+            self.polls = 0
+            self.stalled = stalled
+            self.tcp_info = tcp_info
+            self.sent = []
+            self.clock = 0
+            self.events = []
+
+        def event(self, name, **fields):
+            self.events.append(dict(event=name, **fields))
+
+        def gettimeout(self):
+            return self.timeout
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def getsockopt(self, level, option, size=None):
+            if option == socket.TCP_NODELAY:
+                return self.nodelay
+            if not self.tcp_info:
+                raise OSError("unsupported")
+            info = bytearray(192)
+            info[0] = 1
+            struct.pack_into("=I", info, 16, 536)  # Smaller than the default 1 KiB.
+            if self.pending:
+                self.polls += 1
+                if self.polls == 1:
+                    struct.pack_into("=I", info, 144, self.pending)
+                elif self.stalled or self.polls < 4:
+                    struct.pack_into("=I", info, 24, 1)
+                else:
+                    self.pending = 0
+            return bytes(info)
+
+        def setsockopt(self, level, option, value):
+            self.nodelay = value
+
+        def sendall(self, data):
+            if self.started and self.tcp_info and self.nodelay:
+                if self.pending:
+                    raise AssertionError("next frame overwrote unacknowledged data")
+                if len(data) > 536:
+                    raise AssertionError("one write generated multiple TCP segments")
+                self.pending, self.polls = len(data), 0
+            self.sent.append(bytes(data))
+
+        def recv(self, length):
+            self.started = True
+            return struct.pack("<I", 1)[:length]
+
+        def sleep(self, seconds):
+            self.clock += seconds
+
+    def stream(self, sock, console="DS"):
+        with tempfile.TemporaryDirectory(prefix="ds-flow-") as area:
+            image = Path(area) / "app.nds"
+            payload = bytes(range(251)) * 9
+            image.write_bytes(payload)
+            with patch.object(pc.time, "monotonic", side_effect=lambda: sock.clock), \
+                    patch.object(pc.time, "sleep", side_effect=sock.sleep), \
+                    patch.object(pc.sys, "platform", "linux"), \
+                    patch.object(pc.socket, "TCP_INFO", 11, create=True):
+                pc.serve_update(sock, image, 0x509, console, sock)
+            return payload
+
+    def test_waits_for_ack_and_unsent_queue_before_sending_next_segment(self):
+        sock = self.RadioSocket()
+        payload = self.stream(sock)
+        self.assertEqual(b"".join(sock.sent)[64:], payload)  # No hello in serve_update.
+        manifest = sock.sent[1]
+        self.assertEqual(manifest[16:], hashlib.sha256(payload).digest())
+        flow = next(e for e in sock.events if e["event"] == "transfer_flow_control")
+        self.assertEqual((flow["mode"], flow["chunk_bytes"]), ("tcp-ack", 536))
+        self.assertGreater(sock.clock, 0)
+        self.assertTrue(all(e["tcp_acknowledged"] for e in sock.events
+                            if e["event"] == "chunk_sent"))
+        self.assertEqual((sock.nodelay, sock.timeout), (0, 2))
+
+    def test_stalled_ack_stops_before_queueing_file_data(self):
+        sock = self.RadioSocket(stalled=True)
+        with patch.object(pc, "DS_UPDATE_ACK_TIMEOUT_SECONDS", 0.02):
+            with self.assertRaises(pc.MailboxError):
+                self.stream(sock)
+        self.assertEqual(len(sock.sent), 3)  # Availability, manifest, start reply.
+        self.assertIn("tcp_ack_timeout", [e["event"] for e in sock.events])
+        self.assertIn("transfer_failed", [e["event"] for e in sock.events])
+        self.assertEqual((sock.nodelay, sock.timeout), (0, 2))
+
+    def test_portable_fallback_paces_small_blocks_and_does_not_claim_tcp_acks(self):
+        sock = self.RadioSocket(tcp_info=False)
+        payload = self.stream(sock)
+        self.assertEqual(b"".join(sock.sent)[64:], payload)
+        self.assertTrue(all(len(block) <= 256 for block in sock.sent[3:]))
+        self.assertAlmostEqual(sock.clock, (len(sock.sent) - 2) * pc.DS_UPDATE_PACE_SECONDS)
+        self.assertTrue(all(not e["tcp_acknowledged"] for e in sock.events
+                            if e["event"] == "chunk_sent"))
+
+    def test_3ds_keeps_native_streaming(self):
+        sock = self.RadioSocket()
+        payload = self.stream(sock, "3DS")
+        self.assertEqual(sock.sent[3:], [payload])
+        self.assertEqual(sock.clock, 0)
+        self.assertNotIn("transfer_flow_control", [e["event"] for e in sock.events])
 
 
 class MailboxTests(unittest.TestCase):
@@ -183,6 +303,91 @@ class MailboxTests(unittest.TestCase):
             watcher.join(timeout=1)
             self.assertFalse(watcher.is_alive())
 
+    def test_udp_discovery_echoes_nonce_and_ignores_malformed_requests(self):
+        responder = pc.DiscoveryResponder(("127.0.0.1", 0)).start()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.settimeout(0.25)
+                client.sendto(b"NOTCHESTLINK", responder.address)
+                with self.assertRaises(socket.timeout):
+                    client.recvfrom(64)
+
+                nonce = b"\x19\x42\xa7\xfe"
+                client.sendto(pc.DISCOVERY_REQUEST + nonce, responder.address)
+                response, _ = client.recvfrom(64)
+                self.assertEqual(response, pc.DISCOVERY_RESPONSE + nonce)
+        finally:
+            responder.close()
+
+    def test_update_telemetry_is_saved_only_for_an_authenticated_update_peer(self):
+        audit = pc.UpdateAudit(self.server, "127.0.0.1", "DS")
+        responder = pc.DiscoveryResponder(("127.0.0.1", 0), server=self.server).start()
+        record = {
+            "session": "987650-1", "event": "download_progress",
+            "elapsed_ms": 2500, "phase": "download",
+            "tcp_received_bytes": 65536, "bytes_written": "61440",
+            "total_bytes": "1329664",
+            "radio": "driver=NTR security=WPA2 ccmp_valid=48 mic_failed=0",
+        }
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            deadline = time.monotonic() + 2
+            log_path = self.box.root / "update-communication.jsonl"
+            sender.sendto(pc.UPDATE_TRACE_MAGIC + json.dumps(record).encode(),
+                          responder.address)
+            time.sleep(0.05)
+            self.assertNotIn("udp-client-trace", log_path.read_text())
+
+            self.server.register_update_peer("127.0.0.1", audit)
+            sender.sendto(pc.UPDATE_TRACE_MAGIC + json.dumps(record).encode(),
+                          responder.address)
+            while time.monotonic() < deadline:
+                if log_path.is_file() and "udp-client-trace" in log_path.read_text():
+                    break
+                time.sleep(0.01)
+            lines = [json.loads(line) for line in log_path.read_text().splitlines()]
+            client_record = next(row for row in lines
+                                 if row.get("transport") == "udp-client-trace")
+            self.assertEqual(client_record["client_session"], "987650-1")
+            self.assertEqual(client_record["event"], "download_progress")
+            self.assertEqual(client_record["peer_ip"], "127.0.0.1")
+            self.assertIn("security=WPA2", client_record["radio"])
+            self.assertNotIn(str(PIN), log_path.read_text())
+
+            # The console reports a TCP timeout only after the PC socket has
+            # closed. Preserve the authenticated association briefly for that
+            # final radio snapshot.
+            self.server.unregister_update_peer("127.0.0.1", audit)
+            record.update(event="update_failed", elapsed_ms=3100,
+                          tcp_received_bytes=8192)
+            sender.sendto(pc.UPDATE_TRACE_MAGIC + json.dumps(record).encode(),
+                          responder.address)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+                if any(row.get("transport") == "udp-client-trace" and
+                       row.get("event") == "update_failed" for row in rows):
+                    break
+                time.sleep(0.01)
+            self.assertTrue(any(row.get("transport") == "udp-client-trace" and
+                                row.get("event") == "update_failed" and
+                                row.get("tcp_received_bytes") == 8192
+                                for row in rows))
+        finally:
+            sender.close()
+            self.server.unregister_update_peer("127.0.0.1", audit)
+            responder.close()
+
+    def test_ds_udp_broadcast_discovers_server_address(self):
+        responder = pc.DiscoveryResponder(("0.0.0.0", 0)).start()
+        try:
+            result = subprocess.run([str(DISCOVERY_PROBE), str(responder.address[1])],
+                                    text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertRegex(result.stdout.strip(), r"^(?:\d{1,3}\.){3}\d{1,3}$")
+        finally:
+            responder.close()
+
     def test_pc_discovers_nds_release_only_when_manifest_matches_binary(self):
         with tempfile.TemporaryDirectory(prefix="chest-nds-release-") as folder:
             root = Path(folder)
@@ -252,6 +457,60 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("CANCELLED 0.4.3", run.stdout)
         self.assertEqual(install.read_bytes(), old)
 
+    def test_update_offer_waits_longer_than_general_socket_timeout(self):
+        client, server = socket.socketpair()
+        server.settimeout(0.02)
+        errors = []
+
+        def offer_update():
+            try:
+                pc.serve_update(server, self.nds_update_path, 0x403, "DS")
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(pc, "UPDATE_SOCKET_TIMEOUT_SECONDS", 0.2):
+            worker = threading.Thread(target=offer_update)
+            worker.start()
+            self.assertEqual(pc.result(client), "")
+            self.assertEqual(len(pc.exact(client, 48)), 48)
+            time.sleep(0.05)
+            client.sendall(struct.pack("<I", 0))
+            worker.join(1)
+
+        client.close()
+        server.close()
+        self.assertFalse(worker.is_alive(), "server did not finish the declined update")
+        self.assertEqual(errors, [])
+
+    def test_update_stream_tolerates_client_backpressure_longer_than_general_timeout(self):
+        client, server = socket.socketpair()
+        client.settimeout(2)
+        server.settimeout(0.02)
+        errors = []
+
+        def send_update():
+            try:
+                pc.serve_update(server, self.nds_update_path, 0x403, "DS")
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(pc, "UPDATE_SOCKET_TIMEOUT_SECONDS", 0.2):
+            worker = threading.Thread(target=send_update)
+            worker.start()
+            self.assertEqual(pc.result(client), "")
+            manifest = pc.exact(client, 48)
+            self.assertEqual(struct.unpack_from("<I", manifest, 12)[0], len(self.nds_update_data))
+            client.sendall(struct.pack("<I", 1))
+            self.assertEqual(pc.result(client), "")
+            time.sleep(0.05)
+            self.assertEqual(pc.exact(client, len(self.nds_update_data)), self.nds_update_data)
+            worker.join(2)
+
+        client.close()
+        server.close()
+        self.assertFalse(worker.is_alive(), "server did not finish streaming the accepted update")
+        self.assertEqual(errors, [])
+
     def test_nds_update_downloads_verified_launchable_copy(self):
         install = self.root / "ChestLink_DS_v0.4.3.nds"
         run = subprocess.run(
@@ -262,6 +521,17 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("INSTALLED 0.4.3", run.stdout)
         self.assertEqual(install.read_bytes(), self.nds_update_data)
         self.assertFalse(Path(str(install) + ".previous").exists())
+        audit_path = self.box.root / "update-communication.jsonl"
+        records = [json.loads(line) for line in audit_path.read_text().splitlines()]
+        events = [record["event"] for record in records]
+        self.assertIn("authentication_accepted", events)
+        self.assertIn("offer_sent", events)
+        self.assertIn("decision_received", events)
+        self.assertIn("transfer_ack_sent", events)
+        self.assertIn("chunk_sent", events)
+        self.assertIn("transfer_stream_sent", events)
+        self.assertTrue(all(record["console"] == "DS" for record in records))
+        self.assertNotIn(str(PIN), audit_path.read_text())
 
     def test_nds_update_preserves_existing_copy_and_supports_cancel(self):
         install = self.root / "ChestLink_DS_v0.4.3.nds"

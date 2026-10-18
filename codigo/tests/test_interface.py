@@ -14,6 +14,8 @@ from unittest.mock import patch
 from server import chest_link_server as pc
 from server.interface import Interface
 from server import pokemon
+from tools.build_gen3_dex import version_exclusive_for
+from tools.build_gen4_dex import apply_hgss_special_availability
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "build/chest-link-cli"
@@ -197,6 +199,17 @@ class InterfaceTests(unittest.TestCase):
         connection.request("GET","/native-saves.css")
         response=connection.getresponse();self.assertEqual(response.status,200);self.assertIn(b".native-view",response.read());connection.close()
 
+    def test_native_save_import_uses_the_selected_game_as_a_generation_three_hint(self):
+        app=(ROOT/"server/web/app.js").read_text()
+        interface=(ROOT/"server/interface.py").read_text()
+        parser=(ROOT/"server/native_saves.py").read_text()
+        self.assertIn("'X-Game': selectedGame",app)
+        self.assertIn('game_hint = self.headers.get("X-Game")',interface)
+        self.assertIn('source.get("gameHint")',parser)
+        self.assertIn("function nativeGameMatchesSnapshot(gameId, snapshot)",app)
+        for game in ("firered","leafgreen","ruby","sapphire","emerald"):
+            self.assertIn(f"id: '{game}'",app)
+
     def test_hotspot_controls_are_loopback_only(self):
         class FakeHotspot:
             running = False
@@ -358,9 +371,21 @@ class InterfaceTests(unittest.TestCase):
     def test_actual_offline_web_assets_and_response_headers(self):
         for path in ["/","/app.js","/style.css","/dex.css","/assets/bg_top.png","/assets/sprites.png",
                      "/assets/game-red.png","/assets/game-blue.png","/assets/game-yellow.png",
-                     "/assets/dex-gen1.json"]:
+                     "/assets/game-gold.jpg","/assets/game-silver.jpg","/assets/game-crystal.jpg",
+                     "/assets/game-firered.jpg","/assets/game-leafgreen.jpg","/assets/game-ruby.jpg",
+                     "/assets/game-sapphire.jpg","/assets/game-emerald.jpg",
+                     "/assets/dex-gen1.json","/assets/dex-gen2.json","/assets/dex-gen3.json"]:
             status,data,headers=self.request(path);self.assertEqual(status,200);self.assertGreater(len(data),100);self.assertEqual(headers["Cache-Control"],"no-store");self.assertIn("frame-ancestors 'none'",headers["Content-Security-Policy"])
         status,data,_=self.request("/assets/dex-gen1.json");self.assertEqual(len(json.loads(data)["species"]),151)
+        for generation, game_ids in ((2,{"gold","silver","crystal"}),
+                                     (3,{"firered","leafgreen","ruby","sapphire","emerald"})):
+            catalog=json.loads(self.request(f"/assets/dex-gen{generation}.json")[1])
+            games={game["id"]:game for game in catalog["games"]}
+            self.assertEqual(set(games),game_ids)
+            self.assertTrue(all((ROOT/"server/web/assets"/games[game]["cover"]).is_file() for game in game_ids))
+        gen3=json.loads(self.request("/assets/dex-gen3.json")[1])
+        gen3_covers={game["id"]:game["cover"] for game in gen3["games"]}
+        self.assertNotEqual(gen3_covers["firered"],gen3_covers["leafgreen"])
 
     def test_pokedex_shows_loading_and_recoverable_api_error(self):
         html=(ROOT/"server/web/index.html").read_text()
@@ -373,14 +398,18 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn('id="dex-error"',html)
         self.assertIn('id="dex-retry"',html)
         self.assertIn("function showDexError(message)",script)
+        self.assertIn("cover.src = `/assets/${game.cover}`",script)
+        self.assertNotIn("dex-generation-mark",script)
+        self.assertNotIn("dex-generation-mark",style)
         self.assertIn("dexGame = 'home', dexPool = 'all'",script)
         # Automatically received Pokemon and manual markings both count,
         # with each species counted only once.
         self.assertIn("nationalTotal: nationalIds.size",script)
         self.assertIn("regionalTotal: regionalIds.size",script)
-        self.assertIn("dexGame === 'home' ? nationalCaptured",script)
-        self.assertIn("game === 'home' ? Object.values(dexState.individual || {}).flat()",script)
-        self.assertIn("const rows = regionalRows.filter",script)
+        self.assertIn("const nationalCaptured = new Set([...automatic, ...dexManualIds(dexGame)])",script)
+        self.assertIn("if (game === 'home') return [",script)
+        self.assertIn("...Object.values(dexState.individual || {}).flat()",script)
+        self.assertIn("const rows = listRows.filter",script)
         self.assertIn("button.disabled = isHome",script)
         self.assertIn("$('dex-exclusive').disabled = isHome ||",script)
         self.assertIn("captured.hidden = isHome",script)
@@ -439,6 +468,204 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(next(row for row in catalog['species'] if row['id']==25)['detailed'])
         self.assertFalse(next(row for row in catalog['species'] if row['id']==252)['detailed'])
         self.assertEqual(json.loads(self.request('/api/pokedex')[1])['homeSpeciesTotal'],len(ids))
+
+    def test_generation_three_catalog_and_progress_are_separate_from_generations_one_and_two(self):
+        status,data,_=self.request("/api/pokedex/catalog?generation=3")
+        self.assertEqual(status,200,data)
+        catalog=json.loads(data)
+        self.assertEqual(catalog["generation"],3)
+        self.assertEqual(len(catalog["nationalSpeciesIds"]),386)
+        self.assertEqual(set(catalog["nationalSpeciesIds"]),set(range(1,387)))
+        self.assertGreater(len(catalog["species"]),len(catalog["nationalSpeciesIds"]))
+        self.assertEqual(sum(row["detailed"] for row in catalog["species"]),386)
+        self.assertEqual([game["id"] for game in catalog["games"]],
+                         ["firered","leafgreen","ruby","sapphire","emerald"])
+        regions={region["id"]:region for region in catalog["regions"]}
+        self.assertEqual(len(regions["kanto"]["speciesIds"]),151)
+        self.assertEqual(len(regions["hoenn"]["speciesIds"]),202)
+        self.assertEqual(regions["kanto"]["games"],["firered","leafgreen"])
+        self.assertEqual(regions["hoenn"]["games"],["ruby","sapphire","emerald"])
+        national_ids=set(catalog["nationalSpeciesIds"])
+        national_species=[row for row in catalog["species"] if row["id"] in national_ids]
+        self.assertEqual(len(national_species),386)
+        self.assertEqual({game:sum(game in row["availableIn"] for row in national_species)
+                          for game in ("firered","leafgreen","ruby","sapphire","emerald")},
+                         {"firered":209,"leafgreen":210,"ruby":195,"sapphire":195,"emerald":241})
+        script=(ROOT/"server/web/app.js").read_text()
+        html=(ROOT/"server/web/index.html").read_text()
+        self.assertIn("const nationalIds = new Set(dexData.nationalSpeciesIds ||",script)
+        self.assertIn("return dexData.species.filter(mon => nationalIds.has(mon.id));",script)
+        self.assertIn('`Todos os ${listRows.length}`',script)
+        self.assertIn('`Disponíveis no jogo · ${available.length}`',script)
+        self.assertIn("Pokédex Regional (150, sem Mew)",script)
+        self.assertNotIn("Todos os 151",html)
+
+        status,data,_=self.request("/api/pokedex",dict(
+            mode="unified",game="ruby",species=386,captured=True))
+        self.assertEqual(status,200,data)
+        state=json.loads(data)
+        self.assertEqual(state["generation3Unified"],[386])
+        self.assertEqual(state["unified"],[])
+        self.assertEqual(state["johtoUnified"],[])
+
+        status,data,_=self.request("/api/pokedex",dict(
+            mode="individual",game="sapphire",species=386,captured=True))
+        self.assertEqual(status,200,data)
+        state=json.loads(data)
+        self.assertEqual(state["generation3Individual"],
+                         {game:[386] for game in ("firered","leafgreen","ruby","sapphire","emerald")})
+        status,data,_=self.request("/api/pokedex",dict(
+            mode="individual",game="sapphire",species=386,captured=False))
+        self.assertEqual(status,200,data)
+        state=json.loads(data)
+        self.assertEqual(state["generation3Individual"]["sapphire"],[])
+        self.assertEqual(state["generation3Individual"]["ruby"],[386])
+        self.assertEqual(state["unified"],[])
+        self.assertEqual(state["johtoUnified"],[])
+
+    def test_generation_four_progress_migrates_without_losing_kanto_or_johto(self):
+        old={"version":4,"mode":"individual","unified":[25],"johtoUnified":[152],
+             "individual":{"red":[4],"blue":[],"yellow":[]},
+             "johtoIndividual":{"gold":[152],"silver":[],"crystal":[]},
+             "legacyGreen":[25],"serverCaptured":[1,152],"johtoServerCaptured":[152]}
+        self.ui.dex_state_file.write_text(json.dumps(old),encoding="utf-8")
+        status,data,_=self.request("/api/pokedex")
+        self.assertEqual(status,200,data)
+        migrated=json.loads(data)
+        self.assertEqual(migrated["unified"],[25])
+        self.assertEqual(migrated["johtoUnified"],[152])
+        self.assertEqual(migrated["individual"]["red"],[4])
+        self.assertEqual(migrated["johtoIndividual"]["gold"],[152])
+        self.assertEqual(migrated["serverCaptured"],[1,25,133])
+        self.assertEqual(migrated["johtoServerCaptured"],[1,25,133,152])
+        self.assertEqual(migrated["generation3Unified"],[])
+        self.assertEqual(migrated["generation3Individual"],
+                         {game:[] for game in ("firered","leafgreen","ruby","sapphire","emerald")})
+
+    def test_generation_four_catalog_and_capture_progress_cover_all_five_games(self):
+        status,data,_=self.request("/api/pokedex/catalog?generation=4")
+        self.assertEqual(status,200,data)
+        catalog=json.loads(data)
+        self.assertEqual(catalog["generation"],4)
+        self.assertEqual(catalog["nationalSpeciesIds"],list(range(1,494)))
+        self.assertEqual(sum(row["detailed"] for row in catalog["species"]),493)
+        self.assertEqual([game["id"] for game in catalog["games"]],
+                         ["diamond","pearl","platinum","heartgold","soulsilver"])
+        cover_sources=json.loads((ROOT/"server/web/assets/game-covers-sources.json").read_text())
+        for game in catalog["games"]:
+            cover=ROOT/"server/web/assets"/game["cover"]
+            self.assertTrue(cover.is_file(),f"missing {game['name']} cover: {cover}")
+            self.assertIn(game["cover"],cover_sources)
+            status,image,headers=self.request(f"/assets/{game['cover']}")
+            self.assertEqual(status,200,game["name"])
+            self.assertEqual(headers.get("Content-Type"),"image/jpeg",game["name"])
+            self.assertTrue(image.startswith(b"\xff\xd8\xff"),game["name"])
+        regional={game:[region for region in catalog["regions"] if game in region["games"]]
+                  for game in ("diamond","pearl","platinum","heartgold","soulsilver")}
+        self.assertEqual([len(regional[game][0]["speciesIds"]) for game in regional],
+                         [151,151,210,256,256])
+        species={row["id"]:row for row in catalog["species"]}
+        self.assertEqual([species[species_id]["exclusiveTo"] for species_id in (152,155,158,387,390,393)],
+                         [None,None,None,None,None,None])
+
+        status,data,_=self.request("/api/pokedex",dict(
+            mode="unified",game="diamond",species=493,captured=True))
+        self.assertEqual(status,200,data)
+        state=json.loads(data)
+        self.assertEqual(state["generation4Unified"],[493])
+        self.assertEqual(state["generation3Unified"],[])
+        self.assertEqual(state["johtoUnified"],[])
+        status,data,_=self.request("/api/pokedex",dict(
+            mode="individual",game="pearl",species=490,captured=True))
+        self.assertEqual(status,200,data)
+        state=json.loads(data)
+        self.assertEqual(state["generation4Individual"],
+                         {game:([490,493] if game=="pearl" else [493])
+                          for game in ("diamond","pearl","platinum","heartgold","soulsilver")})
+        status,data,_=self.request("/api/pokedex",dict(
+            mode="individual",game="platinum",species=490,captured=False))
+        self.assertEqual(status,200,data)
+        state=json.loads(data)
+        self.assertNotIn(490,state["generation4Individual"]["platinum"])
+        self.assertIn(490,state["generation4Individual"]["pearl"])
+
+        script=(ROOT/"server/web/app.js").read_text()
+        html=(ROOT/"server/web/index.html").read_text()
+        self.assertIn("id: 'diamond', name: 'Diamond'",script)
+        self.assertIn("id: 'heartgold', name: 'HeartGold'",script)
+        self.assertIn("dexData.generation === 4",script)
+        self.assertIn('<option value="4">Geração IV · Sinnoh e Johto</option>',html)
+        self.assertNotIn("cards.push(['Conclusão', percent]);",script)
+
+    def test_generation_four_hgss_exclusives_include_version_fossils_and_event_lati(self):
+        data=json.loads((ROOT/"server/web/assets/dex-gen4.json").read_text())
+        species={row["id"]:row for row in data["species"]}
+        exclusives={game:{row["id"] for row in data["species"]
+                         if row["exclusiveTo"]==game}
+                    for game in ("heartgold","soulsilver")}
+        self.assertEqual(exclusives["heartgold"],{
+            56,57,58,59,138,139,167,168,207,226,231,232,302,343,344,
+            347,348,382,458,472})
+        self.assertEqual(exclusives["soulsilver"],{
+            37,38,52,53,140,141,165,166,216,217,225,227,303,316,317,
+            345,346,383})
+        for species_id in (380,381):
+            self.assertIn("heartgold",species[species_id]["availableIn"])
+            self.assertIn("soulsilver",species[species_id]["availableIn"])
+            self.assertIsNone(species[species_id]["exclusiveTo"])
+        self.assertTrue(any("Enigma Stone" in row["area"]
+                            for row in species[380]["encounters"]["soulsilver"]))
+        self.assertTrue(any("Enigma Stone" in row["area"]
+                            for row in species[381]["encounters"]["heartgold"]))
+
+    def test_generation_four_builder_applies_hgss_fossil_and_event_encounters(self):
+        games=("diamond","pearl","platinum","heartgold","soulsilver")
+        species_ids=(138,140,345,347,380,381)
+        encounters={species_id:{game:[] for game in games} for species_id in species_ids}
+        for species_id in (138,140,345,347):
+            encounters[species_id]["heartgold"]=[{"area":"PokeAPI"}]
+            encounters[species_id]["soulsilver"]=[{"area":"PokeAPI"}]
+        encounters[380]["heartgold"]=[{"area":"Roaming Johto"}]
+        encounters[381]["soulsilver"]=[{"area":"Roaming Johto"}]
+
+        apply_hgss_special_availability(encounters)
+
+        self.assertEqual([game for game in games if encounters[138][game]], ["heartgold"])
+        self.assertEqual([game for game in games if encounters[140][game]], ["soulsilver"])
+        self.assertEqual([game for game in games if encounters[345][game]], ["soulsilver"])
+        self.assertEqual([game for game in games if encounters[347][game]], ["heartgold"])
+        self.assertTrue(encounters[380]["heartgold"] and encounters[380]["soulsilver"])
+        self.assertTrue(encounters[381]["heartgold"] and encounters[381]["soulsilver"])
+        self.assertIn("Enigma Stone", encounters[380]["soulsilver"][0]["area"])
+        self.assertIn("Enigma Stone", encounters[381]["heartgold"][0]["area"])
+
+    def test_generation_three_version_exclusives_use_the_actual_version_pairs(self):
+        self.assertEqual(version_exclusive_for(["firered","emerald"]),"firered")
+        self.assertEqual(version_exclusive_for(["sapphire"]),"sapphire")
+        self.assertIsNone(version_exclusive_for(["emerald"]))
+        self.assertIsNone(version_exclusive_for(["ruby","sapphire","emerald"]))
+        data=json.loads((ROOT/"server/web/assets/dex-gen3.json").read_text())
+        species={row["id"]:row for row in data["species"]}
+        exclusives={game:{row["id"] for row in data["species"]
+                         if row["exclusiveTo"]==game}
+                    for game in ("firered","leafgreen","ruby","sapphire","emerald")}
+        self.assertEqual(exclusives["firered"],{
+            23,24,43,44,45,54,55,58,59,90,91,123,125,182,194,195,198,211,212,225,227,239})
+        self.assertEqual(exclusives["leafgreen"],{
+            27,28,37,38,69,70,71,79,80,120,121,126,127,183,184,199,200,215,223,224,226,240,298})
+        self.assertEqual(exclusives["ruby"],{273,274,275,303,335,338,383})
+        self.assertEqual(exclusives["sapphire"],{270,271,272,302,336,337,382})
+        self.assertEqual(exclusives["emerald"],set())
+
+        counterparts={"firered":"leafgreen","leafgreen":"firered",
+                      "ruby":"sapphire","sapphire":"ruby"}
+        for game,counterpart in counterparts.items():
+            for species_id in exclusives[game]:
+                self.assertIn(game,species[species_id]["availableIn"])
+                self.assertNotIn(counterpart,species[species_id]["availableIn"])
+        for species_id in (152,155,158):
+            self.assertEqual(species[species_id]["availableIn"],["emerald"])
+            self.assertIsNone(species[species_id]["exclusiveTo"])
 
     def test_national_capacity_changes_with_species_and_base_sprites(self):
         with patch.object(pokemon,'CATALOG',{'names':['','First','Second','Third']}), \

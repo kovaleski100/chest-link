@@ -18,6 +18,29 @@
 #include "common/common_twl_defs.h"
 #include "common/ieee_defs.h"
 #include "common/mac_addresses.h"
+#include "common/ntr_tcp_diag.h"
+#include "lwip/priv/tcp_priv.h"
+
+int dswifi_tcp_inpacket_ack(void *connection, const void *header, unsigned payload_bytes)
+{
+    struct tcp_pcb *pcb = connection;
+    if (!(WifiData->reqFlags & WFLAG_REQ_DSI_MODE) &&
+        WifiData->curAp.security_type == AP_SECURITY_WPA2 &&
+        pcb->state == ESTABLISHED && payload_bytes)
+    {
+        // tcp_input has already checked the checksum and converted its header
+        // to host byte order. rcv_nxt is the expected sequence BEFORE this data.
+        const struct tcp_hdr *tcp = header;
+        WifiData->stats[WSTAT_NTR_TCP_INPUT_PACKETS]++;
+        WifiData->stats[WSTAT_NTR_TCP_INPUT_SEQ] = tcp->seqno;
+        WifiData->stats[WSTAT_NTR_TCP_INPUT_EXPECTED] = pcb->rcv_nxt;
+        // tcp_receive() normally delays the first ACK until a second segment
+        // or its timer. Prime that decision so it ACKs this data immediately.
+        // Sequence, checksum and receive-window validation still run normally.
+        tcp_set_flags(pcb, TF_ACK_DELAY);
+    }
+    return ERR_OK;
+}
 
 static int Wifi_NTR_TransmitFunctionLink(const void *src, size_t size)
 {
@@ -153,6 +176,15 @@ static int Wifi_NTR_TransmitFunctionLink(const void *src, size_t size)
     // or the size of the size tags
     write_u32(txbufData + size_idx, frame_size | WFLAG_SEND_AS_DATA);
 
+    Wifi_NTR_TcpInfo tcp;
+    if (WifiData->curAp.security_type == AP_SECURITY_WPA2 &&
+        Wifi_NTR_TcpFromIP(data_src, data_size, &tcp) &&
+        Wifi_NTR_TcpIsTrackedAck(WifiData, &tcp))
+    {
+        WifiData->stats[WSTAT_NTR_TCP_ACK_QUEUED]++;
+        WifiData->stats[WSTAT_NTR_TCP_ACK_VALUE] = tcp.ack;
+    }
+
     leaveCriticalSection(oldIME);
 
     WifiData->stats[WSTAT_TXQUEUEDPACKETS]++;
@@ -263,14 +295,27 @@ static void Wifi_NTR_SendPacketToLwip(u8 *packet, size_t size)
     // Note that when WEP is enabled the IV and ICV (and FCS) are removed by
     // the hardware. We can treat all received packets the same way.
 
+    if (!packet || size < sizeof(IEEE_DataFrameHeader))
+        return;
     const IEEE_DataFrameHeader *ieee = (const void *)packet;
-    const LLC_SNAP_Header *snap = (const void *)(packet + sizeof(IEEE_DataFrameHeader));
+    const u16 frame_control = ieee->frame_control;
+    const bool qos = Wifi_IsQosDataFrame(frame_control);
+    const size_t header_size = sizeof(IEEE_DataFrameHeader) +
+                               (qos ? 2 : 0) +
+                               (qos && (frame_control & FC_ORDER) ? 4 : 0);
+    if (size < header_size + sizeof(LLC_SNAP_Header))
+        return;
+    const LLC_SNAP_Header *snap = (const void *)(packet + header_size);
 
     {
         // Only check packets if they are of non-null data type, and if they are
         // coming from the AP (toDS=0).
         // TODO: Check from DS bit?
-        if ((ieee->frame_control & (FC_TO_DS | FC_TYPE_SUBTYPE_MASK)) != TYPE_DATA)
+        if ((frame_control & FC_TO_DS) ||
+            !Wifi_IsDataPayloadFrame(frame_control) ||
+            (frame_control & (FC_TO_DS | FC_FROM_DS)) ==
+                (FC_TO_DS | FC_FROM_DS) ||
+            (!qos && (frame_control & FC_ORDER)))
             return;
 
         // With toDS=0, regardless of the value of fromDS, Address 1 is RA/DA
@@ -302,7 +347,7 @@ static void Wifi_NTR_SendPacketToLwip(u8 *packet, size_t size)
 
         // The source address is in address 3 if "From DS" is set. Otherwise,
         // it's in address 2.
-        if (ieee->frame_control & FC_FROM_DS)
+        if (frame_control & FC_FROM_DS)
             Wifi_CopyMacAddr(eth_header.src_mac, ieee->addr_3);
         else
             Wifi_CopyMacAddr(eth_header.src_mac, ieee->addr_2);
@@ -310,10 +355,10 @@ static void Wifi_NTR_SendPacketToLwip(u8 *packet, size_t size)
 
     // Calculate start and size of the lwIP packet
     void *lwip_buffer = packet
-                      + sizeof(IEEE_DataFrameHeader) + sizeof(LLC_SNAP_Header)
+                      + header_size + sizeof(LLC_SNAP_Header)
                       - sizeof(EthernetFrameHeader);
 
-    size_t data_size = size - sizeof(IEEE_DataFrameHeader) - sizeof(LLC_SNAP_Header);
+    size_t data_size = size - header_size - sizeof(LLC_SNAP_Header);
 
     size_t lwip_buffer_size = sizeof(EthernetFrameHeader) + data_size;
 

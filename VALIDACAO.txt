@@ -1,3 +1,58 @@
+Chest Link 0.5.2 — validação local de 2026-10-15
+
+No topo do console, `IP-server` mostra o IP anunciado pelo servidor Chest Link
+do PC. O estado passa a ser “procurando”, “conectado” ou “não encontrado”,
+usando a descoberta local UDP em vez do teste de internet pública.
+`make -C codigo console-ports-test test mailbox-test gui-test`: passou.
+`make -C codigo release`: DS e 3DS v0.5.2 compilados como par sincronizado e
+publicados localmente. Os oito arquivos em `SHA256SUMS.txt` conferem.
+Emuladores: melonDS passou com menu, faixa “Servidor: não encontrado” e box
+sintética `e2e`; Azahar passou com menu e faixa “Servidor: não encontrado”.
+Ambos estavam sem rede associada; não foi testada descoberta com servidor
+ativo. melonDS usa rede virtual e não se associou ao Wi-Fi real
+`MatheusFKovaleski`. Hardware real ainda não testado.
+Detalhes: codigo/docs/release-0.5.2.md.
+
+Registro anterior:
+
+Corrigida a busca UDP do PC no DS, que podia ficar presa indefinidamente em
+select no DSWifi. A atualização tenta o IP salvo primeiro por até 1,5 s; se
+falhar, busca o PC na rede e tenta o IP encontrado. Se a busca ou a conexão
+com esse IP falhar, permite digitar um IP manualmente e só mostra erro se essa
+conexão também falhar. A descoberta usa socket não bloqueante, limite por
+quadros (~3 s), retransmissão periódica e cancelamento por B. Regressão simula
+relógio parado e confirma limites de 180 quadros para busca e 90 para conexão
+ao IP salvo.
+`make -C codigo console-ports-test test mailbox-test gui-test`: passou.
+`make -C codigo consoles`: DS e 3DS v0.5.1 compilados como par.
+Emuladores: melonDS (no `melonAP` virtual) e Azahar exibiram a tela manual e a
+mensagem final após falha. Isso cobriu somente caminhos de fallback; não foram
+validados o IP salvo que responde, a busca com reconexão bem-sucedida após falha
+do IP salvo, nem o IP manual correto. O host estava no Wi-Fi
+`MatheusFKovaleski`, mas a rota padrão usava Ethernet; melonDS não se associou
+ao SSID real. A box sintética `e2e` permaneceu acessível no melonDS.
+Consulta autenticada ao servidor local, recusada antes do download, confirmou
+DS v0.5.1 (1.329.664 bytes).
+Hardware real: ainda não testado.
+`make -C codigo release`: passou; par DS/3DS v0.5.1 publicado localmente.
+Os oito arquivos listados em `SHA256SUMS.txt` conferem.
+Detalhes: docs/release-0.5.1.md.
+
+Registro anterior:
+Chest Link 0.5.0 — validação local de 2026-10-15
+
+`make -C codigo console-ports-test test mailbox-test gui-test`: passou.
+`make -C codigo release`: DS e 3DS 0.5.0 compilados, verificados e publicados
+localmente como par sincronizado. Builds e manifests conferidos; SHA-256
+atualizados em SHA256SUMS.txt.
+Emuladores: DS chegou ao menu principal no melonDS e 3DS chegou ao menu principal
+no Azahar. O runner expirou aguardando confirmação do menu e da box sintética em
+Consultar bancos; esta sessão não expôs controle de entrada para navegar. A box e
+as transferências não foram validadas nesta execução.
+Hardware real: a versão 0.5.0 ainda não foi testada em DS/3DS físicos.
+Detalhes: docs/release-0.5.0.md.
+
+Registro anterior:
 Chest Link 0.4.28 — validação de 2026-10-13
 
 Corrigida abertura duplicada da recepção após a limpeza da atualização.
@@ -208,3 +263,39 @@ Resultados desta atualização:
   A compilação sintática do app, rede e gráficos host passou com -Werror.
   Os apps foram recompilados em containers oficiais em 2026-10-11; execução
   física no DS/3DS, ExtData real, SD, flashcard e rádio Wi-Fi pendentes.
+
+Validacao v0.5.9 em 2026-10-17:
+  DS e 3DS compilados e publicados com o mesmo numero, banners e manifests.
+  Ambos os emuladores concluiram download, SHA-256 e instalacao em storage privado.
+  Caixa postal: 47 testes passaram; nucleo: 29 grupos; ExtData: 9 grupos.
+  NTR WPA2/RAM/fila/associacao/IPv4/DHCP-TCP passaram; DHCP-TCP tambem com ASan/UBSan.
+  A bateria geral mantem duas falhas anteriores: fixture Sinnoh (nome da especie 157)
+  e expectativa antiga da lista de itens do menu no teste de interface.
+  Evidencias: codigo/build/validation-0.5.9/ e codigo/docs/release-0.5.9.md.
+  Radio WPA2 do DS Lite fisico com esta correcao: ainda nao validado.
+
+
+Validacao v0.5.11 — 17/10/2026
+- DS e 3DS compilados, banners/manifests/hashes validados e publicados juntos com make -C codigo release.
+- Recepcao WPA2: corrigido consumo prematuro de replay/cache quando a fila ARM7/ARM9 esta cheia; regressao reproduzida antes da alteracao.
+- NTR WPA2 166, RAM RX simulada 506, fila 1485, DHCP/TCP real 58 verificacoes: passaram; ASan/UBSan tambem passaram.
+- Contagem de bytes atualiza abaixo de 1%; teste chama o callback real da interface.
+- Escala de imagens sem divisao por pixel: 60 casos e 20 telas completas preservam os pixels; ASan/UBSan passou.
+- MelonDS: download de 1.409.536 bytes, verificacao SHA-256 e instalacao: PASS, rede virtual aberta melonAP.
+- Azahar: download de 1.396.160 bytes, verificacao SHA-256, instalacao e backup anterior distinto preservado: PASS.
+- Tentativas anteriores desta rodada: um timeout no melonDS antes da otimizacao do renderer e uma falha de IPv4 no Azahar antes da transferencia; logs preservados.
+- Executado make -j2 -k -C codigo console-ports-test test mailbox-test gui-test. Testes de portas, protocolo, mailbox (47), GUI nativa (5 grupos) passaram.
+- Duas falhas anteriores continuam: expectativa de especie/nome no parser Sinnoh (test_native_saves) e expectativa literal de menu antigo (test_interface). Nao foram alteradas nesta correcao.
+- Servidor do PC em execucao confirmou ofertas v0.5.11 com os hashes publicados para DS e 3DS; esta verificacao foi local e recusou o download.
+- Hardware fisico: esta versao ainda NAO foi validada no DS real. Os logs antigos nao comprovam fila cheia. Nao se declara resolvido o travamento WPA2 original.
+- Evidencias: codigo/build/validation-0.5.11/summary.json; detalhes: codigo/docs/release-0.5.11.md.
+
+Validacao v0.5.12 — 17/10/2026
+- Somente a numeracao mudou; DS e 3DS publicados juntos como codigo 1292.
+- `make -C codigo release` e os oito checksums do pacote passaram.
+- melonDS e Azahar baixaram, verificaram o hash e instalaram os executaveis v0.5.12 em armazenamento privado.
+- O servidor do PC em execucao ofereceu v0.5.12 para ambos; a verificacao local autenticada recusou antes do download.
+- `console-ports-test` passou; `mailbox-test` passou (47 testes); os cinco grupos nativos de GUI passaram.
+- Permanecem duas falhas de testes ja existentes: nome esperado da especie 157 no fixture Sinnoh e assercao do antigo menu DS em `test_interface`.
+- DS fisico aceitou oferta v0.5.12 em WPA2, mas falhou no 14o bloco (1 ACK TCP pendente); a v0.5.12 nao chegou a instalar e nao foi testada no radio real. Detalhes em `codigo/docs/release-0.5.12.md`.
+- Detalhes: `codigo/docs/release-0.5.12.md`; evidencias: `codigo/build/e2e/run-20261017T191431Z-544726-32253e` e `codigo/build/e2e/run-20261017T191540Z-545370-b34fe9`.

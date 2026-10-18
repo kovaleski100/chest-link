@@ -67,7 +67,7 @@ int main() {
   const char *folder = mkdtemp(pattern);
   assert(folder);
   const std::string install = std::string(folder) + "/custom.3dsx";
-  const std::string old = "original app", updated = "new verified app";
+  const std::string old = "original app", updated(5000, 'n');
   writeText(install, old);
   std::vector<uint8_t> input(16 + 48 + 8, 0); // hello, availability, manifest, ready.
   std::memcpy(input.data() + 16, "CLUPD001", 8);
@@ -78,13 +78,28 @@ int main() {
   std::memcpy(input.data() + 32, expected.data(), expected.size());
   input.insert(input.end(), updated.begin(), updated.end());
   size_t cursor = 0;
+  bool downloadTimeout = false;
+  std::vector<uint32_t> progress;
   Wire wire{[&](void *out, size_t bytes) {
     assert(cursor + bytes <= input.size());
+    if (cursor >= 72) assert(downloadTimeout && bytes <= 4096);
+    if (cursor == 72) assert(bytes == 512);
     std::memcpy(out, input.data() + cursor, bytes); cursor += bytes;
-  }, [](const void *, size_t) {}};
+  }, [&](const void *, size_t bytes) {
+    if (bytes == 4) assert(downloadTimeout);
+  }, [&](unsigned timeout) {
+    assert(timeout == UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS);
+    downloadTimeout = true;
+  }};
   auto result = update3DS(wire, 123456, 0x419, install,
-                         [](uint32_t, uint32_t, uint32_t) { return true; });
+                         [&](uint32_t, uint32_t, uint32_t) {
+                           assert(!downloadTimeout); // Human prompt retains its long timeout.
+                           return true;
+                         }, [&](uint32_t done, uint32_t total) {
+                           assert(total == updated.size()); progress.push_back(done); return true;
+                         });
   assert(result.state == UpdateState::installed && readText(install) == updated);
+  assert(progress.front() == 512 && progress.back() == updated.size());
   assert(readText(install + ".previous") == old);
   bool complete;
   assert(!removePrevious3DSUpdates(install, 0x419, complete) && complete);

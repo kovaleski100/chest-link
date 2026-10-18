@@ -2,9 +2,38 @@
 
 O Native Saves importa um dump de save pelo PC e lê os dados sem alterar o
 arquivo escolhido. A aplicação guarda uma cópia identificada por SHA-256 e um
-snapshot normalizado. O fluxo principal agora é Pokémon FireRed; o parser HGSS
-anterior continua compatível. Bancos PKSMBANK, Pokémon Chest, mailbox,
-protocolos e transferências seguem separados desse leitor.
+snapshot normalizado. O jogo é detectado pelo formato do arquivo; os seletores
+de geração e jogo ficam dentro da aba Pokédex e escolhem qual save importado
+consultar. Bancos PKSMBANK, Pokémon Chest, mailbox, protocolos e transferências
+seguem separados desse leitor.
+
+O app de console também tem um fluxo separado, **Ler saves Pokemon**, para
+copiar boxes de arquivos `.sav` do SD/flashcard para um banco novo do Chest
+Link. Esse fluxo não usa este parser do servidor e também não lê saves ativos
+de cartuchos ou da memória de títulos instalados.
+
+## Cópia de boxes `.sav` no console
+
+No DS/DSi e no 3DS, o Chest Link procura arquivos `.sav` nos diretórios de
+saves conhecidos e no armazenamento montado, aceitando somente extensões e
+tamanhos dos layouts brutos Pokémon das Gerações I–IV. A estrutura e os
+checksums são validados antes de um arquivo aparecer como jogo. Saves de outros
+jogos e formatos de save não reconhecidos são ignorados. As boxes são
+normalizadas para registros PKSM em memória; o arquivo de origem nunca é
+alterado.
+
+A tela inferior permite trocar entre os saves encontrados e suas boxes. O
+usuário pode copiar um Pokémon válido para o rascunho da tela superior ou
+substituí-lo pela box inteira. Ao salvar, o app cria um banco novo no Chest ou
+PKSM selecionado, que depois pode ser enviado ao PC em **Consultar bancos**.
+Esse fluxo não sobrescreve bancos existentes. Gerações I e II aparecem quando
+o destino é PKSM no 3DS, pois o formato Chest do DS aceita Gerações III–IV.
+Os formatos brutos lidos correspondem às versões já catalogadas na Pokédex
+offline.
+
+Esta leitura de arquivos no SD/flashcard não ativa leitura direta de
+cartuchos. Tampouco grava Pokémon nos saves dos jogos: a escrita de save
+continua fora do escopo e sem `GameSaveWriter`.
 
 ## Componentes
 
@@ -12,7 +41,7 @@ protocolos e transferências seguem separados desse leitor.
   leitura e a interface `SaveSource`.
 - `host/native_saves/raw_file_save_source.cpp` lê um arquivo em modo binário,
   limita a leitura a 64 MiB por padrão e calcula o SHA-256 dos bytes retornados.
-- `server/native_saves.py` separa aquisição, detecção, parsers FireRed/HGSS,
+- `server/native_saves.py` separa aquisição, detecção, parsers Gen I/II/III/HGSS,
   comparação, critérios de conclusão e armazenamento dos snapshots.
 - `server/frlg_trainers.json` e `server/frlg_hidden_items.json` guardam nomes e
   localizações usados pelos guias da aba Miscelânea.
@@ -28,12 +57,40 @@ Uma importação repetida do mesmo hash não cria outra observação.
 
 ## Formatos suportados
 
-O importador reconhece FireRed/LeafGreen por estrutura em dumps brutos de
-128 KiB (`0x20000`) e identifica HeartGold (`0x47`) e SoulSilver (`0x53`) em
-dumps HGSS de 512 KiB (`0x80000`). Arquivos reconhecidos com tamanho, setores
-ou checksums inválidos são identificados como inválidos; outros formatos ficam
-preservados como não suportados. Cópias antigas são reprocessadas na inicialização
-quando um parser passa a reconhecê-las, sem reescrever os bytes do save.
+O importador reconhece Red, Blue e Yellow em saves brutos de 32 KiB (`0x8000`)
+e Gold, Silver e Crystal nos formatos internacionais de 32 KiB e japoneses de
+64 KiB (`0x10000`). Crystal e Yellow têm marcadores estruturais próprios.
+Red/Blue e Gold/Silver compartilham o mesmo formato de save; o arquivo bruto
+não permite distingui-los com segurança. Nesses dois casos, a Pokédex mostra a
+geração e o usuário escolhe o título no seletor dentro da própria área. As
+flags capturado/visto lidas do save permanecem as mesmas para ambos.
+
+Em Gen I/II, o parser lê as flags da Pokédex e as insígnias de Kanto/Johto.
+As demais abas mostram que esses dados ainda não estão disponíveis para essas
+gerações. FireRed/LeafGreen continuam reconhecidos em dumps brutos de 128 KiB
+(`0x20000`) e HeartGold (`0x47`)/SoulSilver (`0x53`) em dumps HGSS de 512 KiB
+(`0x80000`). Arquivos reconhecidos com tamanho, estrutura ou checksums inválidos
+são identificados como inválidos; outros formatos ficam preservados como não
+suportados. Cópias antigas são reprocessadas na inicialização quando um parser
+passa a reconhecê-las, sem reescrever os bytes do save.
+
+Na Geração III, o mesmo dump bruto de 128 KiB (`0x20000`) pode ser FireRed,
+LeafGreen, Ruby, Sapphire ou Emerald. A assinatura, os 14 setores de cada slot
+e seus checksums distinguem os layouts de FRLG, Ruby/Sapphire e Emerald. Ruby e
+Sapphire compartilham o mesmo layout, assim como FireRed e LeafGreen; quando o
+nome do arquivo não identifica a versão, o seletor de jogo associa o snapshot
+ao título escolhido. Essa associação é usada em todas as abas e para os dados
+de disponibilidade da Pokédex. Não se presume que o conteúdo seja FireRed só
+porque outro save foi aberto antes.
+
+O reconhecedor Gen I/II segue os marcadores de listas de party/box usados pelo
+[PKHeX SaveUtil](https://github.com/kwsch/PKHeX/blob/master/PKHeX.Core/Saves/Util/SaveUtil.cs).
+Os offsets das flags seguem as estruturas públicas de [SAV1](https://github.com/kwsch/PKHeX/blob/master/PKHeX.Core/Saves/SAV1.cs),
+[SAV1Offsets](https://github.com/kwsch/PKHeX/blob/master/PKHeX.Core/Saves/Substructures/Gen12/SAV1Offsets.cs),
+[SAV2](https://github.com/kwsch/PKHeX/blob/master/PKHeX.Core/Saves/SAV2.cs) e
+[SAV2Offsets](https://github.com/kwsch/PKHeX/blob/master/PKHeX.Core/Saves/Substructures/Gen12/SAV2Offsets.cs).
+As listas usadas para reconhecer Red/Blue também são descritas nas
+[disassemblies pret/pokered](https://github.com/pret/pokered/blob/master/engine/menus/save.asm).
 
 | Estrutura FireRed/LeafGreen | Regra usada | Fonte técnica |
 | --- | --- | --- |
@@ -47,6 +104,14 @@ quando um parser passa a reconhecê-las, sem reescrever os bytes do save.
 | Progresso | Badges, campeão, Pokédex Nacional, flags das Ilhas Sevii e quests Ruby/Sapphire | [`flags.h`](https://github.com/pret/pokefirered/blob/master/include/constants/flags.h), [`event_data.c`](https://github.com/pret/pokefirered/blob/master/src/event_data.c) |
 | Hall da Fama | Setores físicos 28–29; o checksum dos 3968 bytes fica no campo `id` do rodapé, enquanto `checksum` e contador não são usados; até 50 equipes de seis Pokémon, com personalidade (permite calcular natureza), mas sem data, item ou golpes por entrada | [`save.c`](https://github.com/pret/pokefirered/blob/master/src/save.c), [`save.h`](https://github.com/pret/pokefirered/blob/master/include/save.h), [`hall_of_fame.c`](https://github.com/pret/pokefirered/blob/master/src/hall_of_fame.c) |
 | Miscelânea | 654 IDs de treinador (89–742) e 183 flags de itens ocultos associados a eventos de mapa; oito posições reservadas são excluídas | [`opponents.h`](https://github.com/pret/pokefirered/blob/master/include/constants/opponents.h), [`flags.h`](https://github.com/pret/pokefirered/blob/master/include/constants/flags.h), [`data/maps`](https://github.com/pret/pokefirered/tree/master/data/maps), [`renewable_hidden_items.c`](https://github.com/pret/pokefirered/blob/master/src/renewable_hidden_items.c) |
+
+Para Ruby, Sapphire e Emerald, os checksums por setor são lidos conforme os
+layouts públicos de [`pokeruby`](https://github.com/pret/pokeruby/blob/master/src/save.c)
+e [`pokeemerald`](https://github.com/pret/pokeemerald/blob/master/src/save.c).
+Ruby/Sapphire usam SaveBlock1 de `0x3AC0` e SaveBlock2 de `0x890`; Emerald usa
+`0x3D88` e `0xF2C`, respectivamente. O mapa de setores, os offsets de flags e
+os campos específicos de Emerald seguem os respectivos [`global.h` de Ruby](https://github.com/pret/pokeruby/blob/master/include/global.h)
+e [`global.h` de Emerald](https://github.com/pret/pokeemerald/blob/master/include/global.h).
 
 O arquivo precisa conter ao menos um slot completo. Um dump de 128 KiB
 preenchido com `FF` não é um save utilizável e recebe uma mensagem de arquivo
@@ -71,6 +136,14 @@ origem/cópias/checksum. Cada campo
 que pode não ser seguro de interpretar carrega um estado (`supported`,
 `partial`, `unknown` ou `unsupported`) e valor explícito.
 
+O parser Gen I/II lê as flags seen/caught de 151/251 espécies, o ID do treinador,
+o tempo de jogo e as insígnias disponíveis em Kanto/Johto. Ainda não decodifica
+os registros individuais de Pokémon, o nome do treinador ou as demais flags de
+progresso dessas gerações. O resumo da interface só mostra os campos que o
+parser reconhece para cada formato; a estrutura visual é compartilhada, mas os
+campos variam entre jogos. Sem o nome do treinador decodificado, snapshots Gen
+I/II não são comparados entre si apenas com base no ID numérico.
+
 O parser FireRed lê nome do treinador, IDs, sexo, dinheiro e tempo; party e
 boxes; registros PK3 descriptografados e validados; flags seen/caught para 386
 espécies; oito badges; vitória na Indigo League; National Dex; flags
@@ -78,6 +151,17 @@ observáveis das quests das Ilhas Sevii; e dados do Fame Checker, Trainer Tower
 e minigames usados pelo perfil de completude. Registros Pokémon
 com checksum inválido ficam visíveis como inválidos e não entram na contagem de
 espécies extraídas.
+
+O parser Ruby/Sapphire/Emerald também lê treinador, IDs, sexo, dinheiro,
+tempo, party e boxes PK3, flags seen/caught para as 386 espécies, oito
+insígnias de Hoenn, história observável, Hall da Fama e registros de revanche.
+Emerald inclui os flags de Battle Frontier e seus recordes Pokémon Jump e
+Dodrio Berry Picking. Flags de itens ocultos de Hoenn e conteúdo não persistido
+como eventos ou instalações individuais da Battle Frontier ainda são mostrados
+como indisponíveis; a interface não reaproveita flags de FireRed para esses
+jogos. A Pokédex offline da Geração III tem os 386 Pokémon e separa a ordem
+regional de Hoenn (202) da ordem de Kanto dos remakes (151), além das
+disponibilidades e encontros por versão.
 
 A aba Miscelânea mostra quantos flags de vitória dos 654 IDs de treinadores
 estão ativos e oferece uma lista pesquisável desses registros. Os IDs incluem
@@ -193,6 +277,7 @@ segue disponível.
   gerações.
 
 Nenhum resultado desta documentação afirma teste em hardware. A validação
-local e a validação física são reportadas separadamente. As alterações desta
-fase são de PC/host e não mudam os executáveis DS/3DS nem sua versão central em
-`include/version.hpp`.
+local e a validação física são reportadas separadamente. Esta documentação
+abrange o parser de save do PC/host e, na seção indicada, descreve o leitor de
+arquivos `.sav` incorporado aos consoles. As versões DS e 3DS continuam usando
+o número central em `include/version.hpp`.

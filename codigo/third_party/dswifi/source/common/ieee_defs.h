@@ -134,6 +134,23 @@ static_assert(sizeof(IEEE_DataFrameHeader) == 24);
 #define TYPE_QOS_CF_POLL                FORM_DATA(0xE)
 #define TYPE_QOS_CF_POLL_CF_ACK         FORM_DATA(0xF)
 
+// Data subtypes that carry an LLC/SNAP payload. QoS networks commonly use
+// these instead of the legacy Data subtype for downlink frames.
+static inline int Wifi_IsQosDataFrame(u16 frame_control)
+{
+    const u16 type_subtype = frame_control & FC_TYPE_SUBTYPE_MASK;
+    return type_subtype >= TYPE_QOS_DATA &&
+           type_subtype <= TYPE_QOS_DATA_CF_ACK_CF_POLL;
+}
+
+static inline int Wifi_IsDataPayloadFrame(u16 frame_control)
+{
+    const u16 type_subtype = frame_control & FC_TYPE_SUBTYPE_MASK;
+    return (type_subtype >= TYPE_DATA &&
+            type_subtype <= TYPE_DATA_CF_ACK_CF_POLL) ||
+           Wifi_IsQosDataFrame(frame_control);
+}
+
 // Frame fields
 // ------------
 

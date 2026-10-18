@@ -23,17 +23,102 @@ import time
 import uuid
 
 PORT = 40992
+DISCOVERY_REQUEST = b"CLDSDISC"
+DISCOVERY_RESPONSE = b"CLPCDISC"
+UPDATE_TRACE_MAGIC = b"CLUPDLOG"
+DISCOVERY_PACKET_BYTES = 12
 MAX_BOXES, BOX_BYTES, ENTRY = 500, 10080, 336
 MAX_NAMES = 256 * 1024
 PAGE_SIZE = 32
 UPDATE_MAGIC = b"CLUPD001"
 MAX_UPDATE_BYTES = 16 * 1024 * 1024
+UPDATE_SOCKET_TIMEOUT_SECONDS = 600
+DS_UPDATE_ACK_TIMEOUT_SECONDS = 30
+DS_UPDATE_PACE_SECONDS = 0.05
 ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 LOG = logging.getLogger("chest-link")
 
 
 class MailboxError(Exception):
     pass
+
+
+class UpdateAudit:
+    """Append update protocol milestones without recording secrets or payloads."""
+
+    def __init__(self, server, peer_ip, console):
+        self.session = uuid.uuid4().hex[:16]
+        self.peer_ip = peer_ip
+        self.console = console
+        self.started = time.monotonic()
+        self.path = server.update_log_path
+        self.lock = server.update_log_lock
+        self.event("session_started")
+
+    def event(self, name, **fields):
+        entry = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "elapsed_ms": round((time.monotonic() - self.started) * 1000),
+            "session": self.session,
+            "peer_ip": self.peer_ip,
+            "console": self.console,
+            "event": name,
+        }
+        entry.update(fields)
+        try:
+            encoded = json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n"
+            with self.lock, self.path.open("a", encoding="utf-8") as stream:
+                stream.write(encoded)
+                stream.flush()
+        except OSError as error:
+            LOG.warning("Nao foi possivel gravar o log da atualizacao: %s", error)
+
+
+class DiscoveryResponder:
+    """Reply to local Chest Link UDP broadcasts so consoles can refresh the PC IP."""
+
+    def __init__(self, address, server=None):
+        self.server = server
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(address)
+        self.socket.settimeout(0.2)
+        self.address = self.socket.getsockname()
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self._serve, name="chest-link-discovery",
+                                       daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def _serve(self):
+        while not self.stopping.is_set():
+            try:
+                packet, source = self.socket.recvfrom(1200)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if (packet.startswith(UPDATE_TRACE_MAGIC) and self.server is not None):
+                self.server.record_update_telemetry(source[0], packet[len(UPDATE_TRACE_MAGIC):])
+                continue
+            if (len(packet) != DISCOVERY_PACKET_BYTES or
+                    packet[:8] != DISCOVERY_REQUEST):
+                continue
+            try:
+                self.socket.sendto(DISCOVERY_RESPONSE + packet[8:], source)
+            except OSError:
+                if self.stopping.is_set():
+                    break
+
+    def close(self):
+        self.stopping.set()
+        try:
+            self.socket.close()
+        finally:
+            if self.thread.is_alive():
+                self.thread.join(timeout=1)
 
 
 def find_console_update(console):
@@ -82,9 +167,90 @@ def find_nds_update():
     return find_console_update("DS")
 
 
-def serve_update(sock, image, version, console="3DS"):
+class DSUpdateFlowControl:
+    """Keep only one TCP segment outstanding to the NTR software receiver.
+
+    The old DS client speaks the same byte stream. No new client ACK or
+    protocol version is needed to download this fix with an installed app.
+    """
+
+    def __init__(self, sock, audit=None):
+        self.socket = sock
+        self.audit = audit
+        self.mode = "paced"
+        self.chunk_bytes = 256
+        self.previous_nodelay = None
+        if sock.family == getattr(socket, "AF_UNIX", None):
+            self.mode = "local"
+            self.chunk_bytes = 16 * 1024
+        else:
+            try:
+                self.previous_nodelay = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                if sys.platform.startswith("linux") and hasattr(socket, "TCP_INFO"):
+                    info = self._tcp_info()
+                    self.mode = "tcp-ack"
+                    self.chunk_bytes = min(1024, info["mss"])
+            except OSError:
+                # Other PC systems still avoid the old multi-segment burst.
+                # Do not label this timer-based fallback as ACK confirmation.
+                pass
+        if audit:
+            audit.event("transfer_flow_control", mode=self.mode,
+                        chunk_bytes=self.chunk_bytes,
+                        ack_timeout_seconds=DS_UPDATE_ACK_TIMEOUT_SECONDS)
+
+    def _tcp_info(self):
+        # Linux UAPI struct tcp_info: these offsets are stable, including on
+        # 32-bit hosts. Native endian, with explicit offsets (no ABI padding).
+        info = self.socket.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 192)
+        if len(info) < 148:
+            raise OSError("TCP_INFO sem contadores de entrega")
+        mss, = struct.unpack_from("=I", info, 16)
+        if not mss:
+            raise OSError("TCP_INFO sem MSS valido")
+        return dict(state=info[0], mss=mss,
+                    unacked=struct.unpack_from("=I", info, 24)[0],
+                    notsent=struct.unpack_from("=I", info, 144)[0])
+
+    def wait(self):
+        if self.mode == "local":
+            return
+        if self.mode == "paced":
+            time.sleep(DS_UPDATE_PACE_SECONDS)
+            return
+        started = time.monotonic()
+        next_log = started + 5
+        while True:
+            info = self._tcp_info()
+            if info["state"] not in (1, 8):  # ESTABLISHED or CLOSE_WAIT.
+                raise MailboxError("A conexao com o DS foi encerrada durante o envio.")
+            if not info["unacked"] and not info["notsent"]:
+                return
+            now = time.monotonic()
+            if now - started >= DS_UPDATE_ACK_TIMEOUT_SECONDS:
+                if self.audit:
+                    self.audit.event("tcp_ack_timeout", **info)
+                raise MailboxError(f"O DS nao confirmou o recebimento dos dados em "
+                                   f"{DS_UPDATE_ACK_TIMEOUT_SECONDS:g} segundos.")
+            if self.audit and now >= next_log:
+                self.audit.event("tcp_ack_wait", wait_ms=round((now - started) * 1000),
+                                 **info)
+                next_log = now + 5
+            time.sleep(0.005)
+
+    def close(self):
+        if self.previous_nodelay is not None:
+            with contextlib.suppress(OSError):
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY,
+                                       self.previous_nodelay)
+
+
+def serve_update(sock, image, version, console="3DS", audit=None):
     """Send a verified console app only after the PIN-authenticated client accepts."""
     if image is None or not version:
+        if audit:
+            audit.event("update_unavailable")
         reply(sock, f"Atualizacao {console} indisponivel neste pacote.", ok=False)
         return
     try:
@@ -104,29 +270,83 @@ def serve_update(sock, image, version, console="3DS"):
         checksum = digest.digest()
         source.seek(0)
     except OSError:
+        if audit:
+            audit.event("update_file_read_failed")
         reply(sock, f"Nao foi possivel ler o app {console} no pacote do PC.", ok=False)
         return
+    if audit:
+        audit.event("update_image_verified", version=version, bytes=size,
+                    sha256=checksum.hex(), filename=image.name)
 
+    previous_timeout = sock.gettimeout()
+    # The console presents a human confirmation prompt between sending this
+    # offer and replying with its decision. Keep that prompt and the following
+    # DS transfer from inheriting the short, general mailbox idle timeout.
+    sock.settimeout(max(previous_timeout or 0, UPDATE_SOCKET_TIMEOUT_SECONDS))
+    flow = None
     try:
         reply(sock)
         sock.sendall(struct.pack("<8sII32s", UPDATE_MAGIC, version, size, checksum))
+        if audit:
+            audit.event("offer_sent", version=version, bytes=size,
+                        sha256=checksum.hex())
+        decision_started = time.monotonic()
         decision, = struct.unpack("<I", exact(sock, 4))
+        if audit:
+            audit.event("decision_received", accepted=(decision == 1),
+                        decision=decision,
+                        wait_ms=round((time.monotonic() - decision_started) * 1000))
         if decision == 0:
             return
         if decision != 1:
             raise MailboxError("Decisao de atualizacao invalida.")
+        if console == "DS":
+            flow = DSUpdateFlowControl(sock, audit)
         reply(sock)
+        if audit:
+            audit.event("transfer_ack_sent")
+        if flow:
+            flow.wait()  # Deliver the start reply before the first file segment.
         streamed = hashlib.sha256()
+        bytes_sent = 0
+        chunk_index = 0
+        next_checkpoint = 64 * 1024
         while True:
-            block = source.read(16 * 1024)
+            block = source.read(flow.chunk_bytes if flow else 16 * 1024)
             if not block:
                 break
+            send_started = time.monotonic()
             sock.sendall(block)
+            bytes_sent += len(block)
+            if flow:
+                # sendall only queues bytes on the PC. Do not queue the next
+                # segment until this one has actually been acknowledged.
+                flow.wait()
+            chunk_index += 1
             streamed.update(block)
+            if audit and (chunk_index <= 2 or bytes_sent >= next_checkpoint or bytes_sent == size):
+                audit.event("chunk_sent", chunk=chunk_index,
+                            chunk_bytes=len(block), bytes_sent=bytes_sent,
+                            total_bytes=size,
+                            tcp_acknowledged=bool(flow and flow.mode == "tcp-ack"),
+                            send_ms=round((time.monotonic() - send_started) * 1000))
+                if bytes_sent >= next_checkpoint:
+                    next_checkpoint = bytes_sent + 64 * 1024
         if streamed.digest() != checksum:
             raise MailboxError(f"O arquivo {console} mudou durante o envio.")
+        if audit:
+            audit.event("transfer_stream_sent", bytes_sent=bytes_sent,
+                        total_bytes=size, sha256=streamed.hexdigest())
+    except (MailboxError, OSError, ValueError) as error:
+        if audit:
+            audit.event("transfer_failed", bytes_sent=locals().get("bytes_sent", 0),
+                        total_bytes=size, error=str(error))
+        raise
     finally:
         source.close()
+        if flow:
+            flow.close()
+        sock.settimeout(previous_timeout)
 
 
 def exact(sock, length):
@@ -576,28 +796,51 @@ class Handler(socketserver.BaseRequestHandler):
     def handle(self):
         sock, server = self.request, self.server
         sock.settimeout(server.timeout_seconds)
+        audit = None
+        peer_registered = False
         try:
             magic, version, pin, command = struct.unpack("<8sIII", exact(sock, 20))
+            if command in (4, 5):
+                console = "3DS" if command == 4 else "DS"
+                audit = UpdateAudit(server, self.client_address[0], console)
+                audit.event("client_hello_received", protocol_version=version,
+                            protocol_magic_valid=(magic == b"CLMAIL01"))
             if magic != b"CLMAIL01" or version != 1 or pin != server.mailbox.pin:
+                if audit:
+                    audit.event("authentication_rejected",
+                                reason="protocol_mismatch" if magic != b"CLMAIL01" or version != 1 else "pin_mismatch")
                 raise MailboxError("PIN incorreto ou protocolo incompativel.")
             if command not in (1, 2, 3, 4, 5):
                 raise MailboxError("Comando desconhecido.")
+            if audit:
+                audit.event("authentication_accepted")
+                server.register_update_peer(self.client_address[0], audit)
+                peer_registered = True
             reply(sock)
+            if audit:
+                audit.event("server_hello_ack_sent")
             if command in (4, 5):
-                console = "3DS" if command == 4 else "DS"
                 try:
                     image, version = server.update_for(command)
-                    serve_update(sock, image, version, console)
+                    serve_update(sock, image, version, console, audit)
                 except (MailboxError, OSError, ValueError) as exc:
+                    audit.event("update_failed", error=str(exc))
                     LOG.warning("%s: atualizacao %s: %s", self.client_address[0], console, exc)
                 return
             {1: server.mailbox.upload, 2: server.mailbox.listing, 3: server.mailbox.fetch}[command](sock)
         except (MailboxError, OSError, ValueError, RecursionError) as exc:
+            if audit:
+                audit.event("session_failed", error=str(exc))
             LOG.warning("%s: %s", self.client_address[0], exc)
             try:
                 reply(sock, str(exc), ok=False)
             except OSError:
                 pass
+        finally:
+            if peer_registered:
+                server.unregister_update_peer(self.client_address[0], audit)
+            if audit:
+                audit.event("session_closed")
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -614,10 +857,95 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.update_version = update_version
         self.nds_update_path = Path(nds_update_path) if nds_update_path else None
         self.nds_update_version = nds_update_version
+        self.update_log_path = self.mailbox.root / "update-communication.jsonl"
+        self.update_log_lock = threading.Lock()
+        self.update_peer_lock = threading.Lock()
+        self.update_peer_audits = {}
+        self.recent_update_peers = {}
         self.active_lock = threading.Lock()
         self.active = set()
         self.closing = False
         super().__init__(address, Handler)
+
+    def register_update_peer(self, peer_ip, audit):
+        with self.update_peer_lock:
+            self.update_peer_audits.setdefault(peer_ip, []).append(audit)
+
+    def unregister_update_peer(self, peer_ip, audit):
+        with self.update_peer_lock:
+            audits = self.update_peer_audits.get(peer_ip, [])
+            if audit in audits:
+                audits.remove(audit)
+            if not audits:
+                self.update_peer_audits.pop(peer_ip, None)
+            # A console learns about a dropped TCP stream only after the PC
+            # has closed it. Keep the authenticated peer association briefly
+            # so its final failure/radio counters can arrive over UDP.
+            self.recent_update_peers[peer_ip] = (
+                audit, time.monotonic() + UPDATE_SOCKET_TIMEOUT_SECONDS + 30)
+            now = time.monotonic()
+            for address, (_, expires) in list(self.recent_update_peers.items()):
+                if expires <= now:
+                    self.recent_update_peers.pop(address, None)
+            while len(self.recent_update_peers) > 64:
+                self.recent_update_peers.pop(next(iter(self.recent_update_peers)))
+
+    def record_update_telemetry(self, peer_ip, payload):
+        with self.update_peer_lock:
+            audits = self.update_peer_audits.get(peer_ip, [])
+            audit = audits[-1] if audits else None
+            if audit is None:
+                recent = self.recent_update_peers.get(peer_ip)
+                if recent:
+                    candidate, expires = recent
+                    if expires > time.monotonic():
+                        audit = candidate
+                    else:
+                        self.recent_update_peers.pop(peer_ip, None)
+        if audit is None or not 1 <= len(payload) <= 1100:
+            return
+        try:
+            client = json.loads(payload.decode("utf-8"))
+            if not isinstance(client, dict):
+                return
+            client_session = client.get("session")
+            event = client.get("event")
+            if (not isinstance(client_session, str) or
+                    not re.fullmatch(r"[A-Za-z0-9-]{1,48}", client_session) or
+                    not isinstance(event, str) or not re.fullmatch(r"[a-z_]{1,48}", event)):
+                return
+            allowed = {
+                "elapsed_ms", "phase", "tcp_sent_bytes", "tcp_received_bytes",
+                "udp_logs_sent", "udp_logs_failed", "local_log_open", "radio",
+                "idle_ms",
+                "name", "server_ip",
+                "server_port", "timeout_ms", "error", "current_version",
+                "offered_version", "file_bytes", "destination", "bytes_written",
+                "total_bytes", "state", "version",
+            }
+            details = {}
+            for key in allowed & client.keys():
+                value = client[key]
+                if isinstance(value, str):
+                    details[key] = value[:500]
+                elif type(value) is int and 0 <= value <= 0xffffffff:
+                    details[key] = value
+            record = {
+                "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "server_session": audit.session,
+                "client_session": client_session,
+                "peer_ip": peer_ip,
+                "console": audit.console,
+                "transport": "udp-client-trace",
+                "event": event,
+            }
+            record.update(details)
+            encoded = json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n"
+            with self.update_log_lock, self.update_log_path.open("a", encoding="utf-8") as stream:
+                stream.write(encoded)
+                stream.flush()
+        except (UnicodeError, ValueError, OSError):
+            return
 
     def update_for(self, command):
         if command == 4:
@@ -703,6 +1031,7 @@ def main():
     restart_requested = threading.Event()
     watch_stop = threading.Event()
     watcher = None
+    discovery = None
     try:
         mailbox = Mailbox(args.data, args.pin, args.max_mib * 1024 * 1024, args.max_items)
         if __package__:
@@ -713,12 +1042,19 @@ def main():
         update_path, update_version = find_3ds_update()
         nds_update_path, nds_update_version = find_nds_update()
         with Server((args.bind, args.port), mailbox) as server:
+            try:
+                discovery = DiscoveryResponder(
+                    (server.server_address[0], server.server_address[1]),
+                    server=server).start()
+            except OSError as exc:
+                print(f"Descoberta automatica do DS indisponivel: {exc}", flush=True)
             metas = mailbox.all_metadata()
             print("\nCHEST LINK - SERVIDOR DO PC", flush=True)
             addresses = local_ips(args.bind)
             print("IP do PC: " + (" / ".join(addresses) or "consulte ipconfig ou ip addr no PC"))
             print(f"PIN: {mailbox.pin:06d}    Porta TCP: {args.port}")
             print(f"Dados: {mailbox.root}")
+            print(f"Log de atualizacoes: {mailbox.root / 'update-communication.jsonl'}")
             print("Atualizacao DS: " + (f"v{nds_update_version >> 16}.{(nds_update_version >> 8) & 255}.{nds_update_version & 255}"
                                         if nds_update_path else "indisponivel neste pacote"))
             print("Atualizacao 3DS: " + (f"v{update_version >> 16}.{(update_version >> 8) & 255}.{update_version & 255}"
@@ -772,6 +1108,8 @@ def main():
                 server.serve_forever(poll_interval=0.25)
             finally:
                 watch_stop.set()
+                if discovery:
+                    discovery.close()
                 if ui:
                     ui.close()
                 if watcher:

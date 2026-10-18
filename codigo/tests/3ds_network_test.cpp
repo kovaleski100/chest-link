@@ -17,8 +17,8 @@ const char *nativeSSID = "TestNetwork";
 uint32_t nativeIP = 0;
 unsigned socCalls = 0, acExits = 0, socExits = 0, sockets = 0, closed = 0;
 unsigned legacyStatusQueries = 0;
-bool writable = false, established = false;
-int socketError = 0;
+bool respondToDiscovery = false;
+uint8_t discoveryNonce[4]{};
 chestlink::NetworkStatus drawn;
 }
 namespace platform { uint64_t milliseconds() { return now; } }
@@ -36,16 +36,26 @@ long __wrap_gethostid() { return nativeIP; }
 int __wrap_socket(int, int, int) { ++sockets; return 7; }
 int __wrap_close(int fd) { assert(fd == 7); ++closed; return 0; }
 int __wrap_ioctl(int, unsigned long, ...) { return 0; }
-int __wrap_connect(int, const sockaddr *, socklen_t) {
-  errno = established ? EISCONN : EINPROGRESS;
-  return -1;
+int __wrap_setsockopt(int, int, int, const void *, socklen_t) { return 0; }
+ssize_t __wrap_sendto(int, const void *data, size_t size, int,
+                      const sockaddr *, socklen_t) {
+  const auto *packet = static_cast<const uint8_t *>(data);
+  if (size == 12) std::memcpy(discoveryNonce, packet + 8, 4);
+  return static_cast<ssize_t>(size);
 }
-int __wrap_select(int, fd_set *, fd_set *, fd_set *, timeval *timeout) {
-  assert(timeout->tv_sec == 0 && timeout->tv_usec == 0);
-  return writable ? 1 : 0;
-}
-int __wrap_getsockopt(int, int, int, void *out, socklen_t *) {
-  *static_cast<int *>(out) = socketError; return 0;
+ssize_t __wrap_recvfrom(int, void *data, size_t size, int,
+                        sockaddr *source, socklen_t *sourceLength) {
+  if (!respondToDiscovery) { errno = EAGAIN; return -1; }
+  assert(size >= 12);
+  auto *packet = static_cast<uint8_t *>(data);
+  std::memcpy(packet, "CLPCDISC", 8);
+  std::memcpy(packet + 8, discoveryNonce, 4);
+  auto *address = reinterpret_cast<sockaddr_in *>(source);
+  address->sin_family = AF_INET;
+  address->sin_port = htons(40992);
+  address->sin_addr.s_addr = inet_addr("10.0.0.9");
+  *sourceLength = sizeof(*address);
+  return 12;
 }
 }
 
@@ -66,19 +76,21 @@ int main() {
   now = 2000;
   refresh3DSNetworkStatus();
   assert(drawn.ipv4Ready && drawn.ip == "10.0.0.147" && sockets == 1);
-  assert(drawn.internet == chestlink::InternetAccess::checking);
-  socketError = -26; writable = established = true; now = 2001;
+  assert(drawn.server == chestlink::ServerAvailability::searching);
+  respondToDiscovery = true; now = 2001;
   refresh3DSNetworkStatus();
-  assert(drawn.internet == chestlink::InternetAccess::reachable && closed == 1);
+  assert(drawn.server == chestlink::ServerAvailability::connected &&
+         drawn.serverIP == "10.0.0.9" && closed == 1);
   assert(socCalls == 1); // SOC not repeatedly allocated on each refresh.
   nativeIP = inet_addr("10.0.0.148"); now = 3000;
-  writable = established = false;
+  respondToDiscovery = false;
   refresh3DSNetworkStatus();
-  assert(drawn.ip == "10.0.0.148" && sockets == 2);
+  assert(drawn.ip == "10.0.0.148" && sockets == 2 &&
+         drawn.server == chestlink::ServerAvailability::searching);
   nativeWifiStatus = 0; now = 4000;
   refresh3DSNetworkStatus();
   assert(!drawn.connected && !drawn.ipv4Ready && drawn.ssid.empty() && drawn.ip.empty());
-  assert(drawn.internet == chestlink::InternetAccess::unknown && closed == 2);
+  assert(drawn.server == chestlink::ServerAvailability::unknown && closed == 2);
   // gethostid still carries its previous value: native AC status wins.
   bool refused = false;
   try { require3DSNetwork(); } catch (const chestlink::Error &) { refused = true; }
@@ -87,9 +99,9 @@ int main() {
   refresh3DSNetworkStatus();
   assert(drawn.connected && drawn.ipv4Ready && sockets == 3);
   require3DSNetwork();
-  now = 9000;
+  now = 8000;
   refresh3DSNetworkStatus();
-  assert(drawn.internet == chestlink::InternetAccess::unconfirmed && closed == 3);
+  assert(drawn.server == chestlink::ServerAvailability::notFound && closed == 3);
   statusResult = -1; now = 10000;
   refresh3DSNetworkStatus();
   assert(drawn.ip.empty() && !drawn.connected);

@@ -4,6 +4,7 @@
 #include "graphics.hpp"
 #include "graphics_assets.hpp"
 #include "platform.hpp"
+#include "version.hpp"
 #include <algorithm>
 #include <cstdio>
 namespace gui {
@@ -44,16 +45,37 @@ struct Canvas {
       width = a.width;
     if (!height)
       height = a.height;
-    for (int yy = 0; yy < height; ++yy)
+    if (width <= 0 || height <= 0 || !a.width || !a.height)
+      return;
+    // DS CPUs have no hardware integer division. Keep the exact nearest
+    // neighbour coordinates without dividing twice for every screen pixel.
+    const unsigned xStep = a.width / width, xRemainder = a.width % width;
+    const unsigned yStep = a.height / height, yRemainder = a.height % height;
+    unsigned sourceY = 0, yError = 0;
+    for (int yy = 0; yy < height; ++yy) {
+      const auto *row = a.pixels + sourceY * a.width;
+      unsigned sourceX = 0, xError = 0;
       for (int xx = 0; xx < width; ++xx) {
-        uint16_t c =
-            a.pixels[(yy * a.height / height) * a.width + xx * a.width / width];
+        const uint16_t c = row[sourceX];
         if (c & 0x8000)
           pixel(x + xx, y + yy, c);
+        sourceX += xStep;
+        xError += xRemainder;
+        if (xError >= unsigned(width)) {
+          ++sourceX;
+          xError -= width;
+        }
       }
+      sourceY += yStep;
+      yError += yRemainder;
+      if (yError >= unsigned(height)) {
+        ++sourceY;
+        yError -= height;
+      }
+    }
   }
   void text(const std::string &s, int x, int y, uint16_t c = BLACK,
-            unsigned maxChars = 100) {
+            unsigned maxChars = 100, unsigned charSpacing = 7) {
     unsigned n = 0;
     for (size_t i = 0; i < s.size() && n < maxChars; ++i, ++n) {
       unsigned ch = uint8_t(s[i]);
@@ -93,7 +115,7 @@ struct Canvas {
           if (assets::font[ch - 32][row] & (1u << bit))
             pixel(x + bit, y + row, c);
 #endif
-      x += 7;
+      x += charSpacing;
     }
   }
   void centered(const std::string &s, int x, int y, int width,
@@ -153,22 +175,25 @@ void networkStrip() {
   c.text(state + (networkState.ssid.empty() ? "Sem rede" : networkState.ssid),
          28, 3, ink, (width - 32) / 7);
   if (boxScreen) return;
-  c.text(networkState.ipv4Ready ? "IP: " + networkState.ip :
-         networkState.connected ?
-#ifdef CL_NDS
-         "IP: aguardando DHCP"
-#else
-         "IP: indisponivel"
-#endif
-         : "IP: --", 6, 16, BLACK, 21);
-  const char *internet = "Internet: --";
-  switch (networkState.internet) {
-  case chestlink::InternetAccess::checking: internet = "Internet: testando"; break;
-  case chestlink::InternetAccess::reachable: internet = "Internet: TCP OK"; break;
-  case chestlink::InternetAccess::unconfirmed: internet = "Internet: nao confirm."; break;
-  default: break;
+  const char *server = "Servidor: não encontrado";
+  switch (networkState.server) {
+  case chestlink::ServerAvailability::searching:
+    server = "Servidor: procurando"; break;
+  case chestlink::ServerAvailability::connected:
+    server = "Servidor: conectado"; break;
+  case chestlink::ServerAvailability::notFound:
+    server = "Servidor: não encontrado"; break;
+  default:
+    if (networkState.connected && !networkState.ipv4Ready)
+      server = "Servidor: aguardando IP";
+    break;
   }
-  c.text(internet, TOP_WIDTH / 2 + 3, 16, BLACK, (TOP_WIDTH / 2 - 7) / 7);
+  const unsigned spacing = TOP_WIDTH == 320 ? 6 : 7;
+  c.text("ip-server: " +
+             (networkState.serverIP.empty() ? "--" : networkState.serverIP),
+         6, 16, BLACK, (TOP_WIDTH / 2 - 3) / spacing, spacing);
+  c.text(server, TOP_WIDTH / 2 + 3, 16, BLACK,
+         (TOP_WIDTH / 2 - 7) / spacing, spacing);
 }
 void show() { networkStrip(); platform::present(topData, TOP_WIDTH, bottomData); }
 void button(Canvas c, int x, int y, const std::string &label,
@@ -197,7 +222,8 @@ void wrapped(Canvas c, const std::string &s, int x, int y, unsigned cols,
   }
 }
 void header(const std::string &heading) {
-  top().text("CHEST LINK 0.3", 12, 6, BLACK);
+  top().text("CHEST LINK v" + chestlink::appVersionText(chestlink::APP_VERSION_CODE),
+             12, 6, BLACK);
   top().centered(heading, 8, 33, TOP_WIDTH - 16, BLACK, (TOP_WIDTH - 16) / 7);
 }
 void grid(Canvas c, const BoxScreen &s, int x, int y, bool preview) {
@@ -215,6 +241,22 @@ void grid(Canvas c, const BoxScreen &s, int x, int y, bool preview) {
         c.image(assets::pointer, xx + 8, yy - 16, 14, 21);
     }
   }
+}
+void drawPokemonGrid(Canvas c,
+                     const std::array<chestlink::PokemonPreview, 30> &pokemon,
+                     int x, int y, unsigned cursor) {
+  c.outline(x - 2, y - 2, 208, 154, GREEN);
+  for (unsigned i = 0; i < 30; ++i) {
+    int xx = x + (i % 6) * 34, yy = y + (i / 6) * 30;
+    if (pokemon[i].occupied) c.sprite(pokemon[i].sprite, xx, yy);
+    if (i == cursor) c.outline(xx, yy, 34, 30, BORDER);
+  }
+}
+unsigned firstGameTab(const GameBoxesScreen &s) {
+  if (s.games.size() <= 3) return 0;
+  unsigned first = s.gameIndex ? s.gameIndex - 1 : 0;
+  if (first + 3 > s.games.size()) first = unsigned(s.games.size()) - 3;
+  return first;
 }
 } // namespace
 const uint16_t *topPixels() { return topData; }
@@ -361,6 +403,50 @@ int boxHit(int x, int y) {
   }
   if (x >= 283 && y >= 211)
     return 36;
+  return -1;
+}
+void gameBoxes(const GameBoxesScreen &s) {
+  background();
+  header("COPIAR POKEMON DO SAVE");
+  top().text("NOVA BOX DO CHEST LINK", 8, 49, BLACK,
+             (TOP_WIDTH - 16) / 7);
+  const int gx = TOP_WIDTH == 400 ? 45 : 4;
+  drawPokemonGrid(top(), s.target, gx, 72, s.targetCursor);
+  top().text(std::to_string(s.targetCount) + " Pokemon copiados",
+             gx, 225, BLACK, 29);
+
+  unsigned first = firstGameTab(s);
+  for (unsigned i = first; i < std::min<unsigned>(first + 3, s.games.size()); ++i)
+    button(bottom(), 8 + (i - first) * 68, 7, s.games[i], i == s.gameIndex, 64);
+  bottom().image(assets::bar, 7, 37);
+  bottom().centered(s.game, 28, 40, 175, BLACK, 24);
+  bottom().centered(s.boxName + " " + std::to_string(s.box + 1) + "/" +
+                        std::to_string(s.boxes),
+                    28, 53, 175, BLACK, 24);
+  drawPokemonGrid(bottom(), s.source, 4, 66, s.cursor);
+  button(bottom(), 212, 66, "A: Copiar");
+  button(bottom(), 212, 99, "Y: Box toda");
+  button(bottom(), 212, 132, "START: Salvar");
+  button(bottom(), 212, 165, "B: Voltar");
+  bottom().text("L/R: box  X: jogo", 214, 213, BLACK, 15);
+  bottom().text(s.status.empty() ? "Origem preservada" : s.status,
+                8, 218, BLACK, 28);
+  show();
+}
+int gameBoxesHit(const GameBoxesScreen &s, int x, int y) {
+  if (x < 0 || y < 0 || x >= 320 || y >= 240) return -1;
+  if (y >= 7 && y < 35 && x >= 8 && x < 212) {
+    const unsigned first = firstGameTab(s);
+    const unsigned tab = first + unsigned(x - 8) / 68;
+    return tab < s.games.size() && unsigned(x - 8) / 68 < 3
+               ? 40 + int(tab) : -1;
+  }
+  if (y >= 66 && y < 216 && x >= 4 && x < 208)
+    return ((y - 66) / 30) * 6 + (x - 4) / 34;
+  if (x >= 212 && y >= 66 && y < 193) {
+    const int row = (y - 66) / 33;
+    return row >= 0 && row < 4 && (y - 66) % 33 < 28 ? 30 + row : -1;
+  }
   return -1;
 }
 } // namespace gui

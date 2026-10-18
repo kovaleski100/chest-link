@@ -1,8 +1,8 @@
 """Read-only raw-save acquisition and normalized game parsers.
 
-FireRed/LeafGreen layout follows pret/pokefirered's public save structures.
-HGSS layout follows PKHeX's documented SAV4/SAV4HGSS structures. No upstream
-implementation code is copied here; format facts are documented in
+FireRed/LeafGreen layout follows pret/pokefirered's public save structures;
+Gen I/II and HGSS layouts follow public PKHeX and pret format references. No
+upstream implementation code is copied here; format facts are documented in
 docs/NATIVE_SAVES.md.
 """
 from collections import Counter
@@ -25,7 +25,21 @@ except ImportError:
 
 MAX_RAW_SAVE_BYTES = 64 * 1024 * 1024
 HGSS_SIZE = 0x80000
+GEN4_DP_SIZE = 0x80000
+GEN4_DP_GENERAL_SIZE = 0xC100
+GEN4_DP_STORAGE_SIZE = 0x121E0
+GEN4_PT_GENERAL_SIZE = 0xCF2C
+GEN4_PT_STORAGE_SIZE = 0x121E4
+GEN4_DP_DEX_OFFSET = 0x12DC
+GEN4_DP_TRAINER_OFFSET = 0x64
+GEN4_DP_PARTY_OFFSET = 0x98
+GEN4_PT_DEX_OFFSET = 0x1328
+GEN4_PT_TRAINER_OFFSET = 0x68
+GEN4_PT_PARTY_OFFSET = 0xA0
 FRLG_SIZE = 0x20000
+GEN1_SIZE = 0x8000
+GEN2_INT_SIZE = 0x8000
+GEN2_JPN_SIZE = 0x10000
 PARTITION_SIZE = 0x40000
 GENERAL_SIZE = 0xF628
 STORAGE_START = 0xF700
@@ -41,8 +55,52 @@ BOX_COUNT = 18
 BOX_SLOTS = 30
 BOX_SIZE = 0x1000
 DEX_SPECIES_COUNT = 493
+GEN4_HOF_SIZE = 0x2AC0
+GEN4_HOF_ENTRY_SIZE = 0x16C
+GEN4_HOF_TEAM_SIZE = 0x3C
+GEN4_HOF_ENTRY_COUNT = 30
 SAVE_MAGIC = {0x20060623, 0x20070903}
 ROM_VERSIONS = {0x47: "HeartGold", 0x53: "SoulSilver"}
+SINNOH_BADGE_NAMES = ("Coal", "Forest", "Cobble", "Fen", "Relic", "Mine", "Icicle", "Beacon")
+GEN1_LAYOUTS = {
+    "international": dict(party=0x2F2C, box=0x30C0, max_count=20,
+                           dex_caught=0x25A3, dex_seen=0x25B6,
+                           starter=0x29C3, pikachu_friendship=0x271C,
+                           checksum=0x3523, badge=0x2602, trainer_id=0x2605,
+                           play_time=0x2CED),
+    "japanese": dict(party=0x2ED5, box=0x302D, max_count=30,
+                      dex_caught=0x259E, dex_seen=0x25B1,
+                      starter=0x29B9, pikachu_friendship=0x2712,
+                      checksum=0x3594, badge=0x25F8, trainer_id=0x25FB,
+                      play_time=0x2CA0),
+}
+GEN2_LAYOUTS = {
+    "gs-int": dict(game="Gold / Silver", game_version="GS", generation=2,
+                   party=0x288A, box=0x2D6C, max_count=20,
+                   dex_caught=0x2A4C, dex_seen=0x2A6C,
+                   checksum_end=0x2D68, checksum_offsets=(0x2D69, 0x7E6D),
+                   trainer_id=0x2009, badges=0x23E4, play_time=0x2053),
+    "crystal-int": dict(game="Crystal", game_version="C", generation=2,
+                        party=0x2865, box=0x2D10, max_count=20,
+                        dex_caught=0x2A27, dex_seen=0x2A47,
+                        checksum_end=0x2B82, checksum_offsets=(0x2D0D, 0x1F0D),
+                        trainer_id=0x2009, badges=0x23E5, play_time=0x2052),
+    "gs-jpn": dict(game="Gold / Silver", game_version="GS", generation=2,
+                   party=0x283E, box=0x2D10, max_count=30,
+                   dex_caught=0x29CE, dex_seen=0x29EE,
+                   checksum_end=0x2C8B, checksum_offsets=(0x2D0D, 0x7F0D),
+                   trainer_id=0x2009, badges=0x23C5, play_time=0x2034),
+    "crystal-jpn": dict(game="Crystal", game_version="C", generation=2,
+                        party=0x281A, box=0x2D10, max_count=30,
+                        dex_caught=0x29AA, dex_seen=0x29CA,
+                        checksum_end=0x2AE2, checksum_offsets=(0x2D0D, 0x7F0D),
+                        trainer_id=0x2009, badges=0x23C7, play_time=0x2034),
+    "gs-kor": dict(game="Gold / Silver", game_version="GS", generation=2,
+                   party=0x28CC, box=0x2DAE, max_count=20,
+                   dex_caught=0x2A8E, dex_seen=0x2AAE,
+                   checksum_end=0x2DAA, checksum_offsets=(0x2DAB, 0x7E6B),
+                   trainer_id=0x2009, badges=0x23DC, play_time=0x204D),
+}
 FRLG_SECTION_LENGTHS = (0xF24, 0xF80, 0xF80, 0xF80, 0xEE8,
                         *([0xF80] * 8), 0x7D0)
 FRLG_SECTOR_SIZE = 0x1000
@@ -126,9 +184,42 @@ FRLG_PLAY_TIME_OFFSET = 0x000E
 FRLG_POKEDEX_OFFSET = 0x0018
 FRLG_DEX_OWNED_OFFSET = FRLG_POKEDEX_OFFSET + 0x10
 FRLG_DEX_SEEN_OFFSET = FRLG_POKEDEX_OFFSET + 0x44
+GEN3_SECTOR_DATA_SIZE = 0xF80
+GEN3_STORAGE_SIZE = 0x83D0
+GEN3_SAVE_BLOCK1_RS_SIZE = 0x3AC0
+GEN3_SAVE_BLOCK1_E_SIZE = 0x3D88
+GEN3_SAVE_BLOCK2_RS_SIZE = 0x890
+GEN3_SAVE_BLOCK2_E_SIZE = 0xF2C
+GEN3_SECTION_LENGTHS = {
+    # SaveBlock1/2 and PokemonStorage chunks from the public pokeruby and
+    # pokeemerald save layouts. FRLG retains its already-supported section map.
+    "RS": (GEN3_SAVE_BLOCK2_RS_SIZE, *([GEN3_SECTOR_DATA_SIZE] * 3), 0xC40,
+           *([GEN3_SECTOR_DATA_SIZE] * 8), 0x7D0),
+    "E": (GEN3_SAVE_BLOCK2_E_SIZE, *([GEN3_SECTOR_DATA_SIZE] * 3), 0xF08,
+          *([GEN3_SECTOR_DATA_SIZE] * 8), 0x7D0),
+    "FRLG": FRLG_SECTION_LENGTHS,
+}
+GEN3_LAYOUTS = {
+    "RS": dict(game="Ruby / Sapphire", region="Hoenn", systemFlags=0x800,
+               flagsOffset=0x1220, block1Size=GEN3_SAVE_BLOCK1_RS_SIZE,
+               block2Size=GEN3_SAVE_BLOCK2_RS_SIZE, partyCount=0x234,
+               party=0x238, money=0x490, encryptionKey=None,
+               rematches=0x97A, rematchCount=100, regionalSpecies=202),
+    "E": dict(game="Emerald", region="Hoenn", systemFlags=0x860,
+              flagsOffset=0x1270, block1Size=GEN3_SAVE_BLOCK1_E_SIZE,
+              block2Size=GEN3_SAVE_BLOCK2_E_SIZE, partyCount=0x234,
+              party=0x238, money=0x490, encryptionKey=0xAC,
+              rematches=0x9CA, rematchCount=100, regionalSpecies=202),
+}
+GEN3_BADGE_NAMES = ("Stone", "Knuckle", "Dynamo", "Heat", "Balance", "Feather", "Mind", "Rain")
+GEN3_GAME_CLEAR_FLAG = 0x04
+GEN3_POKEDEX_RECEIVED_FLAG = 0x01
+GEN3_NATIONAL_DEX_FLAG = 0x36
+GEN3_BADGE_FLAG_START = 0x07
 BADGE_NAMES = {
     "johto": ("Zephyr", "Hive", "Plain", "Fog", "Storm", "Mineral", "Glacier", "Rising"),
     "kanto": ("Boulder", "Cascade", "Thunder", "Rainbow", "Soul", "Marsh", "Volcano", "Earth"),
+    "sinnoh": SINNOH_BADGE_NAMES,
 }
 _NAMESPACE = uuid.UUID("bcf3bd11-8547-42c5-a2be-b52bce03888f")
 
@@ -137,6 +228,15 @@ def _trainer_key(snapshot):
     trainer = snapshot.get("trainer", {})
     return tuple(trainer.get(key, {}).get("value")
                  for key in ("trainerId", "secretId", "name"))
+
+
+def _trainer_identity_reliable(snapshot):
+    trainer = snapshot.get("trainer", {})
+    trainer_id = trainer.get("trainerId", {})
+    name = trainer.get("name", {})
+    return (trainer_id.get("state") == "supported" and trainer_id.get("value") is not None and
+            name.get("state") == "supported" and isinstance(name.get("value"), str) and
+            bool(name["value"].strip()))
 
 
 class NativeSaveError(Exception):
@@ -155,11 +255,227 @@ class SnapshotRepositoryError(NativeSaveError):
     """Persistent Native Saves metadata is invalid or could not be saved."""
 
 
+def _g12_list_valid(data, offset, maximum):
+    return (0 <= offset < len(data) and
+            (count := data[offset]) <= maximum and
+            offset + 1 + count < len(data) and data[offset + 1 + count] == 0xFF)
+
+
+def _gen2_checksum_valid(data, layout):
+    end = layout["checksum_end"]
+    if end >= len(data) or any(offset + 2 > len(data) for offset in layout["checksum_offsets"]):
+        return False
+    expected = sum(data[0x2009:end + 1]) & 0xFFFF
+    return all(struct.unpack_from("<H", data, offset)[0] == expected
+               for offset in layout["checksum_offsets"])
+
+
+def _detect_gen12(data):
+    if len(data) == GEN1_SIZE:
+        matches = [(key, layout) for key, layout in GEN1_LAYOUTS.items()
+                   if _g12_list_valid(data, layout["party"], layout["max_count"])
+                   and _g12_list_valid(data, layout["box"], layout["max_count"])]
+        if len(matches) == 1:
+            key, layout = matches[0]
+            yellow = (data[layout["starter"]] == 0x54 or
+                      data[layout["starter"]] == 0 and data[layout["pikachu_friendship"]] != 0)
+            version = "YW" if yellow else "RB"
+            return dict(game="Yellow" if yellow else "Red / Blue",
+                        gameVersion=version, generation=1,
+                        region="Kanto", layout=key, state="candidate")
+
+    if len(data) in (GEN2_INT_SIZE, GEN2_JPN_SIZE):
+        japanese = len(data) == GEN2_JPN_SIZE
+        candidates = [(key, layout) for key, layout in GEN2_LAYOUTS.items()
+                      if (key.endswith("-jpn") == japanese and
+                          _g12_list_valid(data, layout["party"], layout["max_count"]) and
+                          _g12_list_valid(data, layout["box"], layout["max_count"]))]
+        valid_checksums = [(key, layout) for key, layout in candidates
+                           if _gen2_checksum_valid(data, layout)]
+        if len(valid_checksums) == 1:
+            candidates = valid_checksums
+        if len(candidates) == 1:
+            key, layout = candidates[0]
+            return dict(game=layout["game"], gameVersion=layout["game_version"],
+                        generation=2, region="Johto", layout=key, state="candidate")
+    return None
+
+
+def _gen3_slot(data, slot, variant):
+    """Validate one rotating 14-sector Generation III save slot."""
+    sections, sector_offsets, counters = {}, {}, set()
+    lengths = GEN3_SECTION_LENGTHS[variant]
+    for sector_index in range(FRLG_SECTOR_COUNT):
+        offset = (slot * FRLG_SECTOR_COUNT + sector_index) * FRLG_SECTOR_SIZE
+        block = data[offset:offset + FRLG_SECTOR_SIZE]
+        if len(block) != FRLG_SECTOR_SIZE:
+            return None
+        section_id, checksum, magic, counter = struct.unpack_from("<HHII", block, 0xFF4)
+        if (section_id >= FRLG_SECTOR_COUNT or section_id in sections or
+                magic != FRLG_SAVE_MAGIC):
+            return None
+        if _frlg_checksum(block[:lengths[section_id]]) != checksum:
+            return None
+        sections[section_id] = block[:lengths[section_id]]
+        sector_offsets[section_id] = offset
+        counters.add(counter)
+    if len(sections) != FRLG_SECTOR_COUNT or len(counters) != 1:
+        return None
+    return dict(slot=slot, counter=counters.pop(), sections=sections,
+                sectorOffsets=sector_offsets)
+
+
+def _gen3_filename_variant(filename):
+    normalized = "".join(char for char in str(filename).casefold() if char.isalnum())
+    if "leafgreen" in normalized or "firered" in normalized:
+        return "FRLG"
+    if "emerald" in normalized:
+        return "E"
+    if "ruby" in normalized or "sapphire" in normalized:
+        return "RS"
+    return None
+
+
+def _gen3_game_hint_variant(game_hint):
+    return {
+        "firered": "FRLG", "leafgreen": "FRLG", "ruby": "RS", "sapphire": "RS",
+        "emerald": "E",
+    }.get(str(game_hint or "").casefold())
+
+
+def _gen3_game_name(variant, filename="", game_hint=None):
+    normalized = "".join(char for char in str(filename).casefold() if char.isalnum())
+    if variant == "FRLG":
+        if str(game_hint or "").casefold() == "firered":
+            return "FireRed"
+        if str(game_hint or "").casefold() == "leafgreen":
+            return "LeafGreen"
+        return _frlg_game_name(filename)
+    if variant == "RS":
+        if str(game_hint or "").casefold() == "sapphire":
+            return "Sapphire"
+        if str(game_hint or "").casefold() == "ruby":
+            return "Ruby"
+        if "sapphire" in normalized:
+            return "Sapphire"
+        if "ruby" in normalized:
+            return "Ruby"
+        return "Ruby / Sapphire"
+    return "Emerald"
+
+
+def _detect_gen3(data, filename="", game_hint=None):
+    if len(data) != FRLG_SIZE:
+        return None
+    matches = []
+    for variant in ("RS", "E", "FRLG"):
+        slots = [parsed for index in range(FRLG_SLOT_COUNT)
+                 if (parsed := _gen3_slot(data, index, variant)) is not None]
+        if slots:
+            matches.append((variant, slots))
+    selected_hint = _gen3_game_hint_variant(game_hint)
+    file_hint = _gen3_filename_variant(filename)
+    if len(matches) == 1:
+        variant, slots = matches[0]
+        game = _gen3_game_name(variant, filename, game_hint)
+        game_version = ("FR" if game == "FireRed" else "LG" if game == "LeafGreen" else
+                        "FRLG" if variant == "FRLG" else
+                        "RS" if game in ("Ruby", "Sapphire", "Ruby / Sapphire") else "E")
+        return dict(game=game, gameVersion=game_version, generation=3,
+                    variant=variant, slots=slots,
+                    region="Kanto" if variant == "FRLG" else "Hoenn", state="candidate")
+    elif len(matches) > 1:
+        by_variant = {variant: slots for variant, slots in matches}
+        variant_hint = selected_hint if selected_hint in by_variant else file_hint
+        if variant_hint not in by_variant:
+            return None
+        variant, slots = variant_hint, by_variant[variant_hint]
+        game = _gen3_game_name(variant, filename, game_hint)
+        game_version = ("FR" if game == "FireRed" else "LG" if game == "LeafGreen" else
+                        "FRLG" if variant == "FRLG" else
+                        "RS" if variant == "RS" else "E")
+        return dict(game=game, gameVersion=game_version, generation=3,
+                    variant=variant, slots=slots,
+                    region="Kanto" if variant == "FRLG" else "Hoenn", state="candidate")
+    hinted = selected_hint or file_hint
+    if hinted:
+        game = _gen3_game_name(hinted, filename, game_hint)
+        game_version = ("FR" if game == "FireRed" else "LG" if game == "LeafGreen" else
+                        "FRLG" if hinted == "FRLG" else
+                        "RS" if hinted == "RS" else "E")
+        return dict(game=game, gameVersion=game_version, generation=3,
+                    variant=hinted, region="Kanto" if hinted == "FRLG" else "Hoenn",
+                    state="candidate")
+    return None
+
+
+def _gen4_layout_has_magic(data, start, length):
+    if len(data) != GEN4_DP_SIZE:
+        return False
+    return any(_u32(data, partition + start + length - 8) in SAVE_MAGIC
+               for partition in (0, PARTITION_SIZE)
+               if partition + start + length <= len(data))
+
+
+def _gen4_named_game(game_hint=None, filename=""):
+    hint = str(game_hint or "").casefold().replace(" ", "")
+    normalized = "".join(char for char in str(filename).casefold() if char.isalnum())
+    for game in ("diamond", "pearl", "platinum", "heartgold", "soulsilver"):
+        if hint == game or game in normalized:
+            return game
+    return None
+
+
+def _detect_gen4(data, filename="", game_hint=None):
+    """Identify Gen IV saves by their independent, checksummed main blocks."""
+    if len(data) != GEN4_DP_SIZE:
+        return None
+    named_game = _gen4_named_game(game_hint, filename)
+    layouts = (
+        ("PT", "Platinum", GEN4_PT_GENERAL_SIZE, GEN4_PT_STORAGE_SIZE),
+        ("DP", "Diamond / Pearl", GEN4_DP_GENERAL_SIZE, GEN4_DP_STORAGE_SIZE),
+        ("HGSS", None, GENERAL_SIZE, STORAGE_SIZE),
+    )
+    for code, default_name, general_size, storage_size in layouts:
+        storage_start = (STORAGE_START if code == "HGSS" else general_size)
+        if not (_gen4_layout_has_magic(data, 0, general_size) and
+                _gen4_layout_has_magic(data, storage_start, storage_size)):
+            continue
+        if code == "HGSS":
+            versions = {data[partition + TRAINER_OFFSET + 0x1C]
+                        for partition in (0, PARTITION_SIZE)}
+            versions.intersection_update(ROM_VERSIONS)
+            if not versions:
+                continue
+            version = next(iter(versions))
+            return dict(game=ROM_VERSIONS[version], gameVersion="HG" if version == 0x47 else "SS",
+                        generation=4, region="Johto", state="candidate")
+        if code == "PT":
+            return dict(game="Platinum", gameVersion="PT", generation=4,
+                        region="Sinnoh", state="candidate")
+        game = named_game if named_game in ("diamond", "pearl") else None
+        if game is None:
+            return dict(game="Diamond / Pearl", gameVersion="DP", generation=4,
+                        region="Sinnoh", state="candidate")
+        return dict(game=game.title(), gameVersion="DP", generation=4,
+                    region="Sinnoh", state="candidate")
+    return None
+
+
 class GameDetector:
     """Recognize supported save layouts from their structure, not extension."""
 
-    def detect(self, data, filename=""):
+    def detect(self, data, filename="", game_hint=None):
         data = bytes(data)
+        gen12 = _detect_gen12(data)
+        if gen12:
+            return gen12
+        gen3 = _detect_gen3(data, filename, game_hint)
+        if gen3:
+            return gen3
+        gen4 = _detect_gen4(data, filename, game_hint)
+        if gen4:
+            return gen4
         candidates = ({data[offset + TRAINER_OFFSET + 0x1C]
                        for offset in (0, PARTITION_SIZE)
                        if len(data) > offset + TRAINER_OFFSET + 0x1C}
@@ -168,11 +484,6 @@ class GameDetector:
         if len(matches) == 1:
             version = next(iter(matches))
             return dict(game=ROM_VERSIONS[version], gameVersion="HG" if version == 0x47 else "SS",
-                        state="candidate")
-        if _looks_like_frlg(data, filename):
-            name = _frlg_game_name(filename)
-            return dict(game=name, gameVersion=("FR" if name == "FireRed" else
-                                                "LG" if name == "LeafGreen" else "FRLG"),
                         state="candidate")
         return dict(game=None, state="unknown")
 
@@ -184,20 +495,126 @@ class GameSaveParser:
         raise NotImplementedError
 
 
+class Generation12SaveParser(GameSaveParser):
+    """Read the saved seen/caught flags from raw Gen I and II battery saves."""
+
+    def parse(self, data, source):
+        data = bytes(data)
+        detected = _detect_gen12(data)
+        if not detected:
+            raise UnsupportedRawSave("Formato bruto de Pokémon Red, Blue, Yellow, Gold, Silver ou Crystal não reconhecido.")
+        layout_name = detected["layout"]
+        if detected["generation"] == 1:
+            layout = GEN1_LAYOUTS[layout_name]
+            checksum = (~sum(data[0x2598:layout["checksum"]])) & 0xFF
+            if data[layout["checksum"]] != checksum:
+                raise InvalidRawSave("Checksum da cópia da Geração I inválido.")
+            game_version = detected["gameVersion"]
+            dex_offset_caught, dex_offset_seen = layout["dex_caught"], layout["dex_seen"]
+            species_count = 151
+            badge_names = BADGE_NAMES["kanto"]
+            badge_data = data[layout["badge"]]
+            trainer_id = struct.unpack_from(">H", data, layout["trainer_id"])[0]
+            play_time_offset = layout["play_time"]
+            hours, minutes, seconds = (data[play_time_offset], data[play_time_offset + 2],
+                                       data[play_time_offset + 3])
+            play_time_maxed = data[play_time_offset + 1] != 0
+            region_name = "Kanto"
+            generation = 1
+        else:
+            layout = GEN2_LAYOUTS[layout_name]
+            if not _gen2_checksum_valid(data, layout):
+                raise InvalidRawSave("Checksums da cópia da Geração II inválidos.")
+            game_version = detected["gameVersion"]
+            dex_offset_caught, dex_offset_seen = layout["dex_caught"], layout["dex_seen"]
+            species_count = 251
+            badge_names = BADGE_NAMES["johto"]
+            badge_data = struct.unpack_from("<H", data, layout["badges"])[0]
+            trainer_id = struct.unpack_from(">H", data, layout["trainer_id"])[0]
+            play_time_offset = layout["play_time"]
+            hours = struct.unpack_from(">H", data, play_time_offset)[0]
+            minutes, seconds = data[play_time_offset + 2], data[play_time_offset + 3]
+            play_time_maxed = False
+            region_name = "Johto"
+            generation = 2
+
+        def read_flags(offset):
+            return [species for species in range(1, species_count + 1)
+                    if data[offset + ((species - 1) >> 3)] & (1 << ((species - 1) & 7))]
+
+        caught, seen = read_flags(dex_offset_caught), read_flags(dex_offset_seen)
+        unsupported = _field(None, "unsupported", "Geração I/II: campo fora do escopo do parser atual")
+        if generation == 1:
+            badges = {"kanto": [dict(name=name, acquired=bool(badge_data & (1 << index)))
+                                 for index, name in enumerate(badge_names)]}
+        else:
+            badges = {
+                "johto": [dict(name=name, acquired=bool(badge_data & (1 << index)))
+                          for index, name in enumerate(BADGE_NAMES["johto"])],
+                "kanto": [dict(name=name, acquired=bool(badge_data & (1 << (index + 8))))
+                          for index, name in enumerate(BADGE_NAMES["kanto"])],
+            }
+        play_time_valid = minutes < 60 and seconds < 60
+        play_time = (dict(hours=hours, minutes=minutes, seconds=seconds,
+                          totalSeconds=(None if play_time_maxed else
+                                        hours * 3600 + minutes * 60 + seconds))
+                     if play_time_valid else None)
+        source_record = dict(kind=source.get("kind", "raw_file"),
+                             locator=source.get("locator"), sizeBytes=len(data),
+                             sha256=source["sha256"])
+        return dict(
+            schemaVersion=1,
+            generation=generation,
+            game=detected["game"],
+            gameVersion=game_version,
+            saveHash=source["sha256"],
+            observedAt=datetime.now(timezone.utc).isoformat(),
+            trainer={
+                "name": _field(None, "unsupported", "Codificação de texto Gen I/II ainda não decodificada"),
+                "trainerId": _field(trainer_id),
+                "secretId": unsupported,
+                "gender": unsupported,
+                "money": unsupported,
+                "playTime": _field(play_time, "supported" if play_time_valid else "unknown"),
+            },
+            party=[], boxes=[], pokemon=[],
+            pokedex=dict(seen=seen, caught=caught, seenCount=len(seen),
+                         caughtCount=len(caught), nationalDex=False,
+                         totalSpecies=species_count, regionalSpecies=species_count,
+                         regionName=region_name),
+            badges=badges,
+            collections=dict(unownForms=[], unownCount=None, unownStatus="unsupported"),
+            story={"national_dex": unsupported, "game_clear": unsupported,
+                   "johto_champion": unsupported, "kanto_unlocked": unsupported},
+            supportedFeatures=["pokedex", "badges", "trainerId", "playTime"],
+            rawMetadata=dict(source=source_record, parser="Generation12SaveParser",
+                             checksum="valid", layout=layout_name),
+        )
+
+
 class NativeSaveParser(GameSaveParser):
     """Route an input to a parser after checking its binary layout."""
 
     def __init__(self):
+        self.gen12 = Generation12SaveParser()
         self.frlg = FireRedSaveParser()
+        self.rse = RubySapphireEmeraldSaveParser()
+        self.sinnoh = SinnohSaveParser()
         self.hgss = HGSSSaveParser()
 
     def parse(self, data, source):
-        detected = GameDetector().detect(data, source.get("filename", ""))
+        detected = GameDetector().detect(data, source.get("filename", ""), source.get("gameHint"))
+        if detected.get("generation") in (1, 2):
+            return self.gen12.parse(data, source)
+        if detected.get("variant") in GEN3_LAYOUTS:
+            return self.rse.parse(data, source)
         if detected["state"] == "candidate" and detected["gameVersion"] in ("FR", "LG", "FRLG"):
             return self.frlg.parse(data, source)
+        if detected.get("gameVersion") in ("DP", "PT"):
+            return self.sinnoh.parse(data, source)
         if detected["state"] == "candidate":
             return self.hgss.parse(data, source)
-        raise UnsupportedRawSave("Jogo nao reconhecido como FireRed/LeafGreen, HeartGold ou SoulSilver.")
+        raise UnsupportedRawSave("Jogo não reconhecido como save nativo das Gerações I a IV compatíveis.")
 
 
 class RawFileSaveSource:
@@ -258,7 +675,11 @@ def _filename_says_frlg(filename):
     return "firered" in normalized or "leafgreen" in normalized
 
 
-def _frlg_game_name(filename):
+def _frlg_game_name(filename, game_hint=None):
+    if str(game_hint or "").casefold() == "firered":
+        return "FireRed"
+    if str(game_hint or "").casefold() == "leafgreen":
+        return "LeafGreen"
     normalized = "".join(char for char in str(filename).casefold() if char.isalnum())
     if "leafgreen" in normalized:
         return "LeafGreen"
@@ -449,7 +870,7 @@ def _compare_counters(left, right):
     return same
 
 
-def _select_active_block(data, start, length, label):
+def _select_active_block(data, start, length, label, checksum_excluded=0x10):
     copies = []
     for partition in (0, PARTITION_SIZE):
         offset = partition + start
@@ -461,7 +882,7 @@ def _select_active_block(data, start, length, label):
         minor = _u32(block, footer + 4)
         magic = _u32(block, length - 8)
         saved_crc = _u16(block, length - 2)
-        actual_crc = _crc16_ccitt(block[:-0x10])
+        actual_crc = _crc16_ccitt(block[:-checksum_excluded])
         copies.append(dict(partition=partition, block=block, major=major, minor=minor,
                            magic=magic, saved_crc=saved_crc, actual_crc=actual_crc,
                            checksum_valid=saved_crc == actual_crc))
@@ -487,6 +908,71 @@ def _select_active_block(data, start, length, label):
         backup_checksum=("valid" if copies[1 - selected]["checksum_valid"] and
                          copies[1 - selected]["magic"] in SAVE_MAGIC else "invalid"),
     )
+
+
+def _gen4_hall_of_fame(data, start, game_clear):
+    """Read the 30 fixed-size Gen IV Hall of Fame records when initialized."""
+    candidates = []
+    for partition in (0, PARTITION_SIZE):
+        block = data[partition + start:partition + start + GEN4_HOF_SIZE]
+        if len(block) != GEN4_HOF_SIZE:
+            continue
+        magic = _u32(block, len(block) - 0x10)
+        revision = _u32(block, len(block) - 0x0C)
+        size = _u32(block, len(block) - 0x08)
+        saved_crc = _u16(block, len(block) - 2)
+        valid = (magic in SAVE_MAGIC and size == GEN4_HOF_SIZE - 0x10 and
+                 saved_crc == _crc16_ccitt(block[:-2]))
+        if valid:
+            candidates.append(dict(partition=partition, block=block,
+                                   revision=revision,
+                                   saveIndex=_u32(block, len(block) - 0x14)))
+    if not candidates:
+        return dict(state="unknown" if game_clear else "supported",
+                    count=None if game_clear else 0, entries=[],
+                    **({"reason": "O bloco do Hall da Fama não foi inicializado ou não passou no checksum."}
+                       if game_clear else {}))
+    if len(candidates) == 1:
+        active = candidates[0]
+    else:
+        first, second = candidates
+        compared = _compare_counters(first["revision"], second["revision"])
+        if compared == 2:
+            compared = _compare_counters(first["saveIndex"], second["saveIndex"])
+        active = candidates[1 if compared == 1 else 0]
+
+    entries, invalid_entries = [], 0
+    names = pokemon.CATALOG["names"]
+    for entry_index in range(GEN4_HOF_ENTRY_COUNT):
+        entry_offset = entry_index * GEN4_HOF_ENTRY_SIZE
+        entry = active["block"][entry_offset:entry_offset + GEN4_HOF_ENTRY_SIZE]
+        if len(entry) != GEN4_HOF_ENTRY_SIZE or not any(entry):
+            continue
+        members = []
+        for member_index in range(6):
+            offset = member_index * GEN4_HOF_TEAM_SIZE
+            species = _u16(entry, offset)
+            level = entry[offset + 2]
+            if species == 0:
+                continue
+            if not 1 <= species <= DEX_SPECIES_COUNT or not 1 <= level <= 100:
+                invalid_entries += 1
+                members = []
+                break
+            pid = _u32(entry, offset + 4)
+            tid, sid = _u16(entry, offset + 8), _u16(entry, offset + 10)
+            name = names[species] if species < len(names) else f"Species {species}"
+            nickname = _decode_gen4_text(entry[offset + 12:offset + 34])
+            nature = FRLG_NATURE_NAMES[pid % len(FRLG_NATURE_NAMES)]
+            shiny_value = tid ^ sid ^ (pid & 0xFFFF) ^ (pid >> 16)
+            members.append(dict(species=species, name=name, nickname=nickname or name,
+                                level=level, nature=nature, shiny=shiny_value < 8))
+        if members:
+            entries.append(dict(index=entry_index + 1, pokemon=members))
+    return dict(state="partial" if invalid_entries else "supported",
+                count=len(entries), entries=entries, invalidEntries=invalid_entries,
+                activePartition=active["partition"] // PARTITION_SIZE,
+                revision=active["revision"])
 
 
 def _decode_gen4_text(data):
@@ -561,6 +1047,159 @@ def _decrypt_pk4(record):
 
 def _field(value, state="supported", source="active save block"):
     return dict(state=state, value=value, source=source)
+
+
+class SinnohSaveParser(GameSaveParser):
+    """Read Diamond, Pearl and Platinum 512 KiB raw save dumps."""
+
+    LAYOUTS = {
+        "DP": dict(game_size=GEN4_DP_GENERAL_SIZE, storage_size=GEN4_DP_STORAGE_SIZE,
+                   trainer=GEN4_DP_TRAINER_OFFSET, party=GEN4_DP_PARTY_OFFSET,
+                   dex=GEN4_DP_DEX_OFFSET, regional_species=151, battle_points=0x65F8),
+        "PT": dict(game_size=GEN4_PT_GENERAL_SIZE, storage_size=GEN4_PT_STORAGE_SIZE,
+                   trainer=GEN4_PT_TRAINER_OFFSET, party=GEN4_PT_PARTY_OFFSET,
+                   dex=GEN4_PT_DEX_OFFSET, regional_species=210, battle_points=0x7234),
+    }
+
+    def parse(self, data, source):
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("O parser espera bytes do save.")
+        data = bytes(data)
+        detected = GameDetector().detect(data, source.get("filename", ""), source.get("gameHint"))
+        if detected.get("gameVersion") not in self.LAYOUTS:
+            raise UnsupportedRawSave("Jogo não reconhecido como Diamond, Pearl ou Platinum.")
+        if len(data) != GEN4_DP_SIZE:
+            raise InvalidRawSave("Save Diamond/Pearl/Platinum truncado ou com tamanho inesperado; esperado 512 KiB.")
+
+        version = detected["gameVersion"]
+        layout = self.LAYOUTS[version]
+        general, general_meta = _select_active_block(
+            data, 0, layout["game_size"], "geral Sinnoh", checksum_excluded=0x14)
+        storage_start = layout["game_size"]
+        storage, storage_meta = _select_active_block(
+            data, storage_start, layout["storage_size"], "boxes Sinnoh", checksum_excluded=0x14)
+        g, s = general["block"], storage["block"]
+        trainer_offset, party_offset = layout["trainer"], layout["party"]
+        trainer_name = _decode_gen4_text(g[trainer_offset:trainer_offset + 16])
+        trainer_gender = g[trainer_offset + 0x18]
+        party_count = g[party_offset - 4]
+        if party_count > 6:
+            raise InvalidRawSave("Quantidade de Pokemon na party excede o limite da Geração IV.")
+        hours = _u16(g, trainer_offset + 0x22)
+        minutes, seconds = g[trainer_offset + 0x24], g[trainer_offset + 0x25]
+        play_time_valid = minutes < 60 and seconds < 60
+        money = _u32(g, trainer_offset + 0x14)
+        money_field = _field(money) if money <= 999999 else _field(None, "unknown")
+
+        party, boxes, pokemon_rows, invalid_records = [], [], [], []
+
+        def read_mon(record, location, offset):
+            decoded = _decrypt_pk4(record[:PK4_STORED_SIZE])
+            if not decoded["occupied"]:
+                return None
+            row = dict(location=location, offset=offset,
+                       status="supported" if decoded["valid"] else "unsupported")
+            if not decoded["valid"]:
+                invalid_records.append(dict(location=location, offset=offset,
+                                            reason="PK4 checksum or species field invalid"))
+                return row
+            row.update({key: decoded[key] for key in
+                        ("pid", "species", "species_name", "tid", "sid", "form",
+                         "original_trainer", "identity_key")})
+            pokemon_rows.append(row)
+            return row
+
+        for slot in range(party_count):
+            relative = party_offset + slot * PK4_PARTY_SIZE
+            absolute = general["partition"] + relative
+            party.append(read_mon(g[relative:relative + PK4_STORED_SIZE],
+                                  dict(area="party", slot=slot), absolute))
+
+        box_data_size = BOX_SLOTS * PK4_STORED_SIZE
+        box_name_start = 4 + BOX_COUNT * box_data_size
+        for box in range(BOX_COUNT):
+            entries = []
+            name_start = box_name_start + box * 40
+            box_name = _decode_gen4_text(s[name_start:name_start + 40])
+            for slot in range(BOX_SLOTS):
+                relative = 4 + box * box_data_size + slot * PK4_STORED_SIZE
+                absolute = storage["partition"] + storage_start + relative
+                row = read_mon(s[relative:relative + PK4_STORED_SIZE],
+                               dict(area="box", box=box, slot=slot), absolute)
+                entries.append(row)
+            boxes.append(dict(index=box, name=box_name or f"Box {box + 1}", pokemon=entries))
+
+        dex = g[layout["dex"]:]
+        if len(dex) < 0x128:
+            raise InvalidRawSave("Bloco da Pokédex Sinnoh incompleto.")
+        seen, caught = [], []
+        for species in range(1, DEX_SPECIES_COUNT + 1):
+            bit = species - 1
+            if dex[4 + (bit >> 3)] & (1 << (bit & 7)):
+                caught.append(species)
+            if dex[4 + 0x40 + (bit >> 3)] & (1 << (bit & 7)):
+                seen.append(species)
+
+        unown_start = 4 + 4 * 0x40 + 4 + 4
+        raw_unown = dex[unown_start:unown_start + 0x1C]
+        unown_values, unown_valid, terminated = [], len(raw_unown) == 0x1C, False
+        for value in raw_unown:
+            if value == 0xFF:
+                terminated = True
+                continue
+            if terminated or value >= 28 or value in unown_values:
+                unown_valid = False
+                break
+            unown_values.append(value)
+
+        progress_flags = g[trainer_offset + 0x1D]
+        national_dex = bool(progress_flags & 2)
+        badge_bits = g[trainer_offset + 0x1A]
+        badges = {"sinnoh": [dict(name=name, acquired=bool(badge_bits & (1 << index)))
+                             for index, name in enumerate(SINNOH_BADGE_NAMES)]}
+        game_clear = bool(progress_flags & 1)
+        story = {"game_clear": _field(game_clear), "national_dex": _field(national_dex),
+                 "sinnoh_champion": _field(game_clear),
+                 "hall_of_fame": _field(None, "unsupported")}
+        hall_of_fame = _gen4_hall_of_fame(data, 0x20000, game_clear)
+        play_seconds = hours * 3600 + minutes * 60 + seconds if play_time_valid else None
+        game = "Platinum" if version == "PT" else detected["game"]
+        return dict(
+            schemaVersion=1, generation=4, game=game, gameVersion=version,
+            saveHash=source["sha256"], observedAt=datetime.now(timezone.utc).isoformat(),
+            trainer={
+                "name": (_field(trainer_name) if trainer_name is not None
+                         else _field(None, "unsupported")),
+                "trainerId": _field(_u16(g, trainer_offset + 0x10)),
+                "secretId": _field(_u16(g, trainer_offset + 0x12)),
+                "gender": _field({0: "male", 1: "female"}.get(trainer_gender)
+                                  if trainer_gender in (0, 1) else None,
+                                  "supported" if trainer_gender in (0, 1) else "unknown"),
+                "money": money_field,
+                "playTime": _field(dict(hours=hours, minutes=minutes, seconds=seconds,
+                                        totalSeconds=play_seconds)
+                                   if play_time_valid else None,
+                                   "supported" if play_time_valid else "unknown"),
+            },
+            party=party, boxes=boxes, pokemon=pokemon_rows,
+            pokedex=dict(seen=seen, caught=caught, seenCount=len(seen), caughtCount=len(caught),
+                         nationalDex=national_dex, totalSpecies=(493 if national_dex else layout["regional_species"]),
+                         regionalSpecies=layout["regional_species"],
+                         regionName=None if national_dex else "Sinnoh"),
+            badges=badges,
+            collections=dict(unownForms=unown_values if unown_valid else [],
+                             unownCount=len(unown_values) if unown_valid else None,
+                             unownStatus="supported" if unown_valid else "unknown"),
+            story=story,
+            miscellany={"battlePoints": _field(_u16(g, layout["battle_points"]))},
+            hallOfFame=hall_of_fame,
+            rawMetadata=dict(
+                source=dict(kind=source.get("kind", "raw_file"), locator=source.get("locator"),
+                            sizeBytes=len(data), sha256=source["sha256"]),
+                activeBlocks=dict(general=general_meta, storage=storage_meta),
+                invalidPokemonRecords=invalid_records,
+                parser="SinnohSaveParser", checksum="valid"),
+        )
 
 
 class HGSSSaveParser(GameSaveParser):
@@ -686,6 +1325,7 @@ class HGSSSaveParser(GameSaveParser):
             "battle_frontier": _field(dict(bp=_u16(g, 0x5BB8)), "partial"),
             "pokeathlon": _field(None, "unsupported"),
         }
+        hall_of_fame = _gen4_hall_of_fame(data, 0x23000, bool(progress_flags & 1))
         play_seconds = hours * 3600 + minutes * 60 + seconds if play_time_valid else None
         return dict(
             schemaVersion=1,
@@ -710,12 +1350,17 @@ class HGSSSaveParser(GameSaveParser):
             boxes=boxes,
             pokemon=pokemon_rows,
             pokedex=dict(seen=seen, caught=caught, seenCount=len(seen), caughtCount=len(caught),
-                         nationalDex=bool(progress_flags & 2)),
+                         nationalDex=bool(progress_flags & 2),
+                         totalSpecies=(493 if progress_flags & 2 else 256),
+                         regionalSpecies=256,
+                         regionName=None if progress_flags & 2 else "Johto"),
             badges=badges,
             collections=dict(unownForms=unown_values if unown_valid else [],
                              unownCount=len(unown_values) if unown_valid else None,
                              unownStatus="supported" if unown_valid else "unknown"),
             story=story,
+            miscellany={"battlePoints": _field(_u16(g, 0x5BB8))},
+            hallOfFame=hall_of_fame,
             rawMetadata=dict(
                 source=dict(kind=source.get("kind", "raw_file"), locator=source.get("locator"),
                             sizeBytes=len(data), sha256=source["sha256"]),
@@ -902,7 +1547,7 @@ class FireRedSaveParser(GameSaveParser):
         completion_data = dict(fameChecker=fame_checker, trainerTower=trainer_tower,
                                minigames=minigames)
         play_seconds = hours * 3600 + minutes * 60 + seconds if play_valid else None
-        game_name = _frlg_game_name(filename)
+        game_name = _frlg_game_name(filename, source.get("gameHint"))
         return dict(
             schemaVersion=3,
             game=game_name,
@@ -944,6 +1589,203 @@ class FireRedSaveParser(GameSaveParser):
                 boxDataOffset=box_data_offset,
                 invalidPokemonRecords=invalid_records,
                 parser="FireRedSaveParser", checksum="valid"),
+        )
+
+
+class RubySapphireEmeraldSaveParser(GameSaveParser):
+    """Read Ruby, Sapphire, and Emerald's native 128 KiB Gen III saves."""
+
+    @staticmethod
+    def _flag(save_block1, layout, flag_id):
+        offset = layout["flagsOffset"] + flag_id // 8
+        if offset >= len(save_block1):
+            return None
+        return bool(save_block1[offset] & (1 << (flag_id & 7)))
+
+    @staticmethod
+    def _record_offset(slot, block1_size, logical_offset):
+        if logical_offset < block1_size:
+            section_id = 1 + logical_offset // GEN3_SECTOR_DATA_SIZE
+            local_offset = logical_offset % GEN3_SECTOR_DATA_SIZE
+        else:
+            storage_offset = logical_offset - block1_size
+            section_id = 5 + storage_offset // GEN3_SECTOR_DATA_SIZE
+            local_offset = storage_offset % GEN3_SECTOR_DATA_SIZE
+        return slot["sectorOffsets"][section_id] + local_offset
+
+    def parse(self, data, source):
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("O parser espera bytes do save.")
+        data = bytes(data)
+        filename = source.get("filename", "")
+        game_hint = source.get("gameHint")
+        detected = _detect_gen3(data, filename, game_hint)
+        if not detected or detected.get("variant") not in GEN3_LAYOUTS:
+            if len(data) != FRLG_SIZE and _gen3_filename_variant(filename):
+                raise InvalidRawSave("Save Ruby/Sapphire/Emerald truncado ou com tamanho inesperado; esperado 128 KiB.")
+            raise UnsupportedRawSave("Formato Ruby, Sapphire ou Emerald esperado: dump bruto de 128 KiB.")
+        variant = detected["variant"]
+        layout = GEN3_LAYOUTS[variant]
+        slots = detected.get("slots") or [slot for index in range(FRLG_SLOT_COUNT)
+                                           if (slot := _gen3_slot(data, index, variant)) is not None]
+        if not slots:
+            raise InvalidRawSave(f"Nenhum slot {layout['game']} completo com setores e checksums válidos foi encontrado.")
+        active = slots[0]
+        for candidate in slots[1:]:
+            if _newer_frlg_counter(candidate["counter"], active["counter"]):
+                active = candidate
+
+        sections = active["sections"]
+        save_block2 = sections[0]
+        save_block1 = b"".join(sections[index] for index in range(1, 5))
+        storage = b"".join(sections[index] for index in range(5, 14))
+        if (len(save_block1) != layout["block1Size"] or
+                len(save_block2) != layout["block2Size"] or len(storage) < GEN3_STORAGE_SIZE):
+            raise InvalidRawSave(f"Os blocos de {layout['game']} estão incompletos.")
+
+        party_count = save_block1[layout["partyCount"]]
+        if party_count > 6:
+            raise InvalidRawSave("Quantidade de Pokémon na party excede seis.")
+        current_box = storage[0]
+        if current_box >= FRLG_BOX_COUNT:
+            raise InvalidRawSave("A box ativa do save está fora do intervalo esperado.")
+        box_data_offset = _frlg_box_data_offset(storage)
+        pokemon_rows, invalid_records = [], []
+
+        def read_mon(record, location, file_offset):
+            decoded = _decrypt_pk3(record[:PK3_STORED_SIZE])
+            if not decoded["occupied"]:
+                return None
+            row = dict(location=location, offset=file_offset,
+                       status="supported" if decoded["valid"] else "unsupported")
+            if not decoded["valid"]:
+                invalid_records.append(dict(location=location, offset=file_offset,
+                                            reason="PK3 checksum or species field invalid"))
+                return row
+            row.update({key: decoded[key] for key in
+                        ("pid", "species", "species_name", "tid", "sid", "form",
+                         "original_trainer", "identity_key", "egg", "shiny")})
+            pokemon_rows.append(row)
+            return row
+
+        party = []
+        for index in range(party_count):
+            logical_offset = layout["party"] + index * PK3_PARTY_SIZE
+            record = save_block1[logical_offset:logical_offset + PK3_PARTY_SIZE]
+            party.append(read_mon(record, dict(area="party", slot=index),
+                                  self._record_offset(active, layout["block1Size"], logical_offset)))
+        boxes = []
+        for box_index in range(FRLG_BOX_COUNT):
+            entries = []
+            for slot_index in range(FRLG_BOX_SLOTS):
+                storage_offset = box_data_offset + (box_index * FRLG_BOX_SLOTS + slot_index) * PK3_STORED_SIZE
+                record = storage[storage_offset:storage_offset + PK3_STORED_SIZE]
+                logical_offset = layout["block1Size"] + storage_offset
+                entries.append(read_mon(record, dict(area="box", box=box_index, slot=slot_index),
+                                        self._record_offset(active, layout["block1Size"], logical_offset)))
+            name_offset = FRLG_BOX_NAMES_OFFSET + box_index * 9
+            name = _decode_gen3_text(storage[name_offset:name_offset + 8])
+            boxes.append(dict(index=box_index, name=name or f"Box {box_index + 1}", pokemon=entries))
+
+        caught, seen = [], []
+        for species in range(1, FRLG_DEX_SPECIES_COUNT + 1):
+            bit = species - 1
+            if save_block2[FRLG_POKEDEX_OFFSET + 0x10 + (bit >> 3)] & (1 << (bit & 7)):
+                caught.append(species)
+            if save_block2[FRLG_POKEDEX_OFFSET + 0x44 + (bit >> 3)] & (1 << (bit & 7)):
+                seen.append(species)
+
+        def flag_field(flag_id):
+            value = self._flag(save_block1, layout, flag_id)
+            return _field(value) if value is not None else _field(None, "unknown")
+
+        dex_flag = flag_field(layout["systemFlags"] + GEN3_NATIONAL_DEX_FLAG)
+        national_magic = save_block2[FRLG_POKEDEX_OFFSET + 2]
+        if dex_flag["value"] is True and national_magic == 0xDA:
+            national_field = _field(True, source="Gen III National Dex system flag and Pokédex marker")
+        elif dex_flag["value"] is False and national_magic != 0xDA:
+            national_field = _field(False, source="Gen III National Dex system flag and Pokédex marker")
+        else:
+            national_field = _field(None, "unknown", "Inconsistent Gen III National Dex markers")
+
+        trainer_id = _u32(save_block2, 0x0A)
+        tid, sid = trainer_id & 0xFFFF, trainer_id >> 16
+        gender_value = save_block2[0x08]
+        hours, minutes, seconds = _u16(save_block2, 0x0E), save_block2[0x10], save_block2[0x11]
+        play_valid = minutes < 60 and seconds < 60
+        money = _u32(save_block1, layout["money"])
+        if layout["encryptionKey"] is not None:
+            money ^= _u32(save_block2, layout["encryptionKey"])
+        money_field = _field(money) if money <= 999999 else _field(None, "unknown")
+
+        badges = [dict(name=name, acquired=bool(self._flag(
+            save_block1, layout, layout["systemFlags"] + GEN3_BADGE_FLAG_START + index)))
+            for index, name in enumerate(GEN3_BADGE_NAMES)]
+        story = {
+            "pokedex_received": flag_field(layout["systemFlags"] + GEN3_POKEDEX_RECEIVED_FLAG),
+            "game_clear": flag_field(layout["systemFlags"] + GEN3_GAME_CLEAR_FLAG),
+            "national_dex": national_field,
+            "regi_doors_opened": flag_field(0xE4),
+            "frontier_unlocked": (flag_field(layout["systemFlags"] + 0x48)
+                                  if variant == "E" else _field(None, "unsupported")),
+        }
+        rematch_bytes = save_block1[layout["rematches"]:
+                                   layout["rematches"] + layout["rematchCount"]]
+        rematches = [dict(trainerId=index + 1, active=value != 0, state=value)
+                     for index, value in enumerate(rematch_bytes)]
+        miscellany = dict(
+            trainerRematches=dict(state="supported", activeCount=sum(row["active"] for row in rematches),
+                                  total=len(rematches), items=rematches),
+            hiddenItems=dict(state="unsupported", found=None, total=None, items=[]),
+        )
+        completion_data = {}
+        if variant == "E":
+            completion_data["minigames"] = dict(
+                pokemonJump=dict(jumpsInRow=_u16(save_block2, 0x1FC),
+                                 bestJumpScore=_u32(save_block2, 0x1FC + 12)),
+                dodrioBerryPicking=dict(berriesPicked=_u16(save_block2, 0x20C + 4),
+                                        berriesPickedInRow=_u16(save_block2, 0x20C + 6),
+                                        bestScore=_u32(save_block2, 0x20C)),
+            )
+        hall_of_fame = _frlg_hall_of_fame(data, story["game_clear"]["value"] is True)
+        play_seconds = hours * 3600 + minutes * 60 + seconds if play_valid else None
+        game_name = _gen3_game_name(variant, filename, game_hint)
+        source_record = dict(kind=source.get("kind", "raw_file"), locator=source.get("locator"),
+                             sizeBytes=len(data), sha256=source["sha256"])
+        return dict(
+            schemaVersion=3, generation=3, game=game_name,
+            gameVersion=("RS" if variant == "RS" else "E"),
+            saveHash=source["sha256"], observedAt=datetime.now(timezone.utc).isoformat(),
+            trainer={
+                "name": _field(_decode_gen3_text(save_block2[0:7])),
+                "trainerId": _field(tid), "secretId": _field(sid),
+                "gender": _field({0: "male", 1: "female"}.get(gender_value)
+                                  if gender_value in (0, 1) else None,
+                                  "supported" if gender_value in (0, 1) else "unknown"),
+                "money": money_field,
+                "playTime": _field(dict(hours=hours, minutes=minutes, seconds=seconds,
+                                        totalSeconds=play_seconds)
+                                   if play_valid else None,
+                                   "supported" if play_valid else "unknown"),
+            },
+            party=party, boxes=boxes, pokemon=pokemon_rows,
+            pokedex=dict(seen=seen, caught=caught, seenCount=len(seen), caughtCount=len(caught),
+                         nationalDex=national_field["value"], totalSpecies=FRLG_DEX_SPECIES_COUNT,
+                         regionalSpecies=layout["regionalSpecies"],
+                         regionName=(layout["region"] if national_field["value"] is not True else None)),
+            badges={"hoenn": badges},
+            collections=dict(unownForms=[], unownCount=None, unownStatus="unsupported"),
+            story=story, completionData=completion_data, miscellany=miscellany,
+            hallOfFame=hall_of_fame,
+            supportedFeatures=["pokedex", "badges", "trainerId", "secretId", "gender", "money",
+                               "playTime", "party", "boxes", "story", "trainerRematches",
+                               "hallOfFame"] + (["minigames"] if variant == "E" else []),
+            rawMetadata=dict(source=source_record, activeSlot=active["slot"],
+                             saveCounter=active["counter"], sectorChecksums="valid",
+                             currentBox=current_box, boxDataOffset=box_data_offset,
+                             invalidPokemonRecords=invalid_records,
+                             parser="RubySapphireEmeraldSaveParser", checksum="valid",
+                             variant=variant),
         )
 
 
@@ -1005,7 +1847,8 @@ class SnapshotComparator:
 
     @staticmethod
     def compare(before, after):
-        if before.get("gameVersion") != after.get("gameVersion"):
+        if (before.get("gameVersion"), before.get("game")) != \
+                (after.get("gameVersion"), after.get("game")):
             raise NativeSaveError("Snapshots de jogos diferentes nao podem ser comparados.")
         before_trainer = before.get("trainer", {})
         after_trainer = after.get("trainer", {})
@@ -1074,6 +1917,23 @@ FIRERED_COMPLETION_PROFILE = dict(
     caveat=("A porcentagem resume os 500 critérios desta aba; os registros opcionais "
             "de treinadores e itens ocultos ficam em Miscelânea."),
 )
+GEN3_COMPLETION_PROFILE = dict(
+    id="gen3-observable-v1",
+    name="Geração III observável",
+    definition=["8 insígnias de Hoenn", "Liga Pokémon de Hoenn", "National Dex desbloqueada",
+                "386 flags de capturado da Pokédex"],
+    caveat=("A porcentagem cobre os flags visíveis neste save; conteúdo de eventos, "
+            "Battle Frontier e itens ocultos não está totalmente modelado."),
+)
+GEN4_SINNOH_COMPLETION_PROFILE = dict(
+    id="sinnoh-observable-v1",
+    name="Geração IV · Sinnoh observável",
+    definition=["8 insígnias de Sinnoh", "Liga Pokémon de Sinnoh",
+                "Pokédex Nacional desbloqueada", "493 flags de capturado da Pokédex",
+                "28 formas de Unown"],
+    caveat=("O perfil mede os flags observáveis no save; eventos distribuídos e conteúdo "
+            "adicional de pós-jogo não são uma confirmação de 100% do jogo."),
+)
 
 
 class CompletionTracker:
@@ -1090,6 +1950,8 @@ class CompletionTracker:
                                      group="badges"))
         story = snapshot.get("story", {})
         is_frlg = snapshot.get("gameVersion") in ("FR", "LG", "FRLG")
+        is_gen3 = snapshot.get("gameVersion") in ("RS", "E")
+        is_sinnoh = snapshot.get("gameVersion") in ("DP", "PT")
         if is_frlg:
             story_criteria = (
                 ("game_clear", "Campeão da Liga Indigo"),
@@ -1108,6 +1970,27 @@ class CompletionTracker:
             dex_name = "Kanto"
             dex_species = [species for species in range(1, dex_count + 1)
                            if species not in FRLG_NATIONAL_DEX_EXCLUDED]
+        elif is_gen3:
+            story_criteria = (("game_clear", "Campeão da Liga de Hoenn"),
+                              ("national_dex", "Pokédex Nacional desbloqueada"))
+            profile = dict(GEN3_COMPLETION_PROFILE)
+            if snapshot.get("gameVersion") == "E":
+                story_criteria += (("frontier_unlocked", "Battle Frontier desbloqueada"),)
+                profile.update(
+                    id="emerald-observable-v1", name="Emerald observável",
+                    definition=[*GEN3_COMPLETION_PROFILE["definition"],
+                                "Battle Frontier desbloqueada",
+                                "200 saltos consecutivos e 200 berries no Dodrio Berry Picking"])
+            dex_count = FRLG_DEX_SPECIES_COUNT
+            dex_name = ""
+            dex_species = range(1, dex_count + 1)
+        elif is_sinnoh:
+            story_criteria = (("game_clear", "Campeão da Liga de Sinnoh"),
+                              ("national_dex", "Pokédex Nacional desbloqueada"))
+            profile = GEN4_SINNOH_COMPLETION_PROFILE
+            dex_count = DEX_SPECIES_COUNT
+            dex_name = "Sinnoh"
+            dex_species = range(1, dex_count + 1)
         else:
             story_criteria = (("johto_champion", "Johto League champion"),
                               ("kanto_unlocked", "Kanto unlocked"))
@@ -1167,8 +2050,20 @@ class CompletionTracker:
                                      state=("unknown" if not known else
                                             "complete" if value >= target else "missing"),
                                      group="minigames"))
+        elif is_gen3 and snapshot.get("gameVersion") == "E":
+            minigames = snapshot.get("completionData", {}).get("minigames", {})
+            jump = minigames.get("pokemonJump", {}).get("jumpsInRow")
+            berries = minigames.get("dodrioBerryPicking", {}).get("berriesPicked")
+            for key, label, value, target in (
+                    ("pokemon-jump", "Pokémon Jump — 200 saltos consecutivos", jump, 200),
+                    ("dodrio-berry-picking", "Dodrio Berry Picking — 200 frutas", berries, 200)):
+                known = isinstance(value, int) and 0 <= value <= 0xFFFF
+                criteria.append(dict(id=f"minigame:{key}", label=label,
+                                     state=("unknown" if not known else
+                                            "complete" if value >= target else "missing"),
+                                     group="minigames"))
         collection = snapshot.get("collections", {})
-        if not is_frlg:
+        if not is_frlg and not is_gen3:
             forms = set(collection.get("unownForms", []))
             for form in range(28):
                 criteria.append(dict(id=f"unown:{form}", label=f"Unown form {form + 1}",
@@ -1182,7 +2077,10 @@ class CompletionTracker:
         total = len(evaluated)
         percent = round((completed * 100.0 / total), 1) if total else 0.0
         group_labels = {
-            "badges": "Insígnias", "story": "História e Ilhas Sevii",
+            "badges": "Insígnias",
+            "story": ("História de Hoenn" if is_gen3 else
+                      "História de Sinnoh" if is_sinnoh else
+                      "História e Ilhas Sevii" if is_frlg else "História de Johto"),
             "pokedex": "Capturas da Pokédex", "fameChecker": "Fame Checker",
             "trainerTower": "Trainer Tower", "minigames": "Minigames",
             "collections": "Coleções",
@@ -1225,7 +2123,7 @@ def _json_write_atomic(path, value):
 
 
 class SnapshotRepository:
-    """Append-only storage for uploaded save copies and normalized snapshots."""
+    """Storage for uploaded save copies and normalized snapshots."""
 
     def __init__(self, data_root):
         self.root = Path(data_root) / "native-saves"
@@ -1263,13 +2161,16 @@ class SnapshotRepository:
         return self.import_bytes(data, filename=filename or self._name_from_path(path),
                                  locator=metadata["locator"], source_kind=metadata["kind"])
 
-    def import_bytes(self, data, filename="save.bin", locator=None, source_kind="raw_file"):
+    def import_bytes(self, data, filename="save.bin", locator=None, source_kind="raw_file",
+                     game_hint=None):
         if not isinstance(data, bytes) or not 0 < len(data) <= MAX_RAW_SAVE_BYTES:
             raise InvalidRawSave("O arquivo esta vazio ou excede 64 MiB.")
         digest = hashlib.sha256(data).hexdigest()
         filename = _safe_filename(filename or "save.bin")
         metadata = dict(kind=source_kind, locator=locator or filename, filename=filename,
                         sizeBytes=len(data), sha256=digest)
+        if game_hint is not None:
+            metadata["gameHint"] = str(game_hint)
         digest = metadata["sha256"]
         with self.lock:
             index = self._read_index()
@@ -1320,13 +2221,16 @@ class SnapshotRepository:
     def _prepare_snapshot(self, index, row, snapshot):
         digest = row["sha256"]
         previous = []
-        for item in index["saves"]:
-            if (item["sha256"] == digest or item.get("state") != "supported" or
-                    item.get("gameVersion") != snapshot["gameVersion"]):
-                continue
-            candidate = self._read_snapshot(item["sha256"])
-            if _trainer_key(candidate) == _trainer_key(snapshot):
-                previous.append((item, candidate))
+        if _trainer_identity_reliable(snapshot):
+            for item in index["saves"]:
+                if (item["sha256"] == digest or item.get("state") != "supported" or
+                        (item.get("gameVersion"), item.get("game")) !=
+                        (snapshot["gameVersion"], snapshot["game"])):
+                    continue
+                candidate = self._read_snapshot(item["sha256"])
+                if (_trainer_identity_reliable(candidate) and
+                        _trainer_key(candidate) == _trainer_key(snapshot)):
+                    previous.append((item, candidate))
         previous_signatures = {mon["identity_key"] for _, candidate in previous
                                for mon in candidate.get("pokemon", [])}
         duplicates = Counter(mon["identity_key"] for mon in snapshot["pokemon"])
@@ -1358,7 +2262,8 @@ class SnapshotRepository:
             for row in index["saves"]:
                 if row.get("state") not in ("unsupported", "invalid"):
                     continue
-                if row.get("sizeBytes") not in (FRLG_SIZE, HGSS_SIZE):
+                if row.get("sizeBytes") not in (GEN1_SIZE, GEN2_INT_SIZE, GEN2_JPN_SIZE,
+                                                  FRLG_SIZE, HGSS_SIZE):
                     continue
                 path = self.saves_dir / f"{row.get('sha256', '')}.sav"
                 try:
@@ -1409,6 +2314,65 @@ class SnapshotRepository:
         with self.lock:
             rows = sorted(self._read_index()["saves"], key=lambda row: row["importedAt"], reverse=True)
             return rows
+
+    def _read_manual_events(self):
+        try:
+            manual = json.loads(self.manual_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as exc:
+            raise SnapshotRepositoryError("Eventos Journey invalidos; os dados foram preservados.") from exc
+        if not isinstance(manual, list) or any(
+                not isinstance(item, dict) or
+                set(item) != {"date", "label", "source", "status", "saveHash"} or
+                item.get("source") != "MANUAL" for item in manual):
+            raise SnapshotRepositoryError("Eventos Journey invalidos; os dados foram preservados.")
+        return manual
+
+    def delete_save(self, digest):
+        """Remove an imported copy and its derived records for one save hash."""
+        snapshot_path = self._snapshot_path(digest)
+        with self.lock:
+            index = self._read_index()
+            row = next((item for item in index["saves"] if item.get("sha256") == digest), None)
+            if row is None:
+                raise SnapshotRepositoryError("Save Native Saves nao encontrado.")
+
+            updated_index = dict(index, saves=[item for item in index["saves"]
+                                               if item.get("sha256") != digest])
+            original_manual = self._read_manual_events()
+            updated_manual = [item for item in original_manual if item.get("saveHash") != digest]
+            manual_exists = self.manual_path.exists()
+            staged = []
+            manual_written = False
+            targets = (self.saves_dir / f"{digest}.sav", snapshot_path)
+            try:
+                for path in targets:
+                    if path.exists() or path.is_symlink():
+                        retired = path.with_name(f".{digest}-{uuid.uuid4().hex}.removed")
+                        os.replace(path, retired)
+                        staged.append((path, retired))
+                if updated_manual != original_manual:
+                    _json_write_atomic(self.manual_path, updated_manual)
+                    manual_written = True
+                _json_write_atomic(self.index_path, updated_index)
+            except BaseException:
+                if manual_written:
+                    if manual_exists:
+                        _json_write_atomic(self.manual_path, original_manual)
+                    else:
+                        self.manual_path.unlink(missing_ok=True)
+                for path, retired in reversed(staged):
+                    if retired.exists() or retired.is_symlink():
+                        os.replace(retired, path)
+                raise
+
+            for _, retired in staged:
+                try:
+                    retired.unlink()
+                except FileNotFoundError:
+                    pass
+            return dict(deleted=True, sha256=digest)
 
     def describe(self, digest):
         with self.lock:
@@ -1536,12 +2500,16 @@ class SnapshotRepository:
                 selected_trainer = _trainer_key(selected_snapshot)
                 supported = [row for row in supported
                              if row["importedAt"] <= selected["importedAt"] and
+                             row.get("gameVersion") == selected_snapshot.get("gameVersion") and
+                             row.get("game") == selected_snapshot.get("game") and
                              _trainer_key(self._read_snapshot(row["sha256"])) == selected_trainer]
             elif supported:
                 latest_snapshot = self._read_snapshot(supported[-1]["sha256"])
                 latest_trainer = _trainer_key(latest_snapshot)
                 supported = [row for row in supported
-                             if _trainer_key(self._read_snapshot(row["sha256"])) == latest_trainer]
+                             if row.get("gameVersion") == latest_snapshot.get("gameVersion") and
+                             row.get("game") == latest_snapshot.get("game") and
+                             _trainer_key(self._read_snapshot(row["sha256"])) == latest_trainer]
             events = []
             previous = None
             story_labels = {
@@ -1600,17 +2568,7 @@ class SnapshotRepository:
                                                source="INFERRED", status="between_snapshots",
                                                saveHash=row["sha256"]))
                 previous = snapshot
-            try:
-                manual = json.loads(self.manual_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                manual = []
-            except (OSError, ValueError) as exc:
-                raise SnapshotRepositoryError("Eventos Journey invalidos; os dados foram preservados.") from exc
-            if not isinstance(manual, list) or any(
-                    not isinstance(item, dict) or
-                    set(item) != {"date", "label", "source", "status", "saveHash"} or
-                    item.get("source") != "MANUAL" for item in manual):
-                raise SnapshotRepositoryError("Eventos Journey invalidos; os dados foram preservados.")
+            manual = self._read_manual_events()
             supported_hashes = {row["sha256"] for row in supported}
             events.extend(item for item in manual if item.get("saveHash") in supported_hashes)
             events.sort(key=lambda item: (item["date"], item["source"], item["label"]))

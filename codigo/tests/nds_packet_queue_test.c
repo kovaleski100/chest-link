@@ -116,10 +116,75 @@ static void test_rx_ethernet(void)
     CHECK(memcmp(received + 6, ap, 6) == 0);
     CHECK(received[12] == 8 && received[13] == 0);
     CHECK(received[14] == 0x45 && received[received_len - 1] == 0x45);
+
+    for (unsigned htc = 0; htc <= 1; ++htc) {
+        memset(frame, 0, sizeof(frame));
+        ieee = (void *)frame;
+        ieee->frame_control = FC_FROM_DS | TYPE_QOS_DATA |
+                              (htc ? FC_ORDER : 0);
+        memcpy(ieee->addr_1, ds, 6);
+        memcpy(ieee->addr_2, ap, 6);
+        memcpy(ieee->addr_3, ap, 6);
+        frame[24] = 5;
+        const size_t header_size = 26 + (htc ? 4 : 0);
+        if (htc) memset(frame + 26, 0x44, 4);
+        memcpy(frame + header_size, snap, sizeof(snap));
+        memset(frame + header_size + sizeof(snap), 0x46, 336);
+        received_len = 0;
+        Wifi_NTR_SendPacketToLwip(frame,
+            header_size + sizeof(snap) + 336);
+        CHECK(received_len == sizeof(EthernetFrameHeader) + 336);
+        CHECK(memcmp(received, ds, 6) == 0);
+        CHECK(memcmp(received + 6, ap, 6) == 0);
+        CHECK(received[12] == 8 && received[13] == 0);
+        CHECK(received[14] == 0x46 && received[received_len - 1] == 0x46);
+    }
+}
+
+static void test_tcp_diagnostics(void)
+{
+    memset(&wifi, 0, sizeof(wifi));
+    wifi.curAp.security_type = AP_SECURITY_WPA2;
+    wifi.stats[WSTAT_NTR_TCP_LOCAL_PORT] = 65000;
+    wifi.stats[WSTAT_NTR_TCP_REMOTE_PORT] = 40992;
+    u8 ethernet[14 + 40] = {0};
+    ethernet[12] = 8;
+    u8 *ip = ethernet + 14, *tcp = ip + 20;
+    ip[0] = 0x45; ip[3] = 40; ip[9] = 6;
+    tcp[0] = 65000 >> 8; tcp[1] = 65000 & 255;
+    tcp[2] = 40992 >> 8; tcp[3] = 40992 & 255;
+    tcp[8] = 0x89; tcp[9] = 0xAB; tcp[10] = 0xCD; tcp[11] = 0xEF;
+    tcp[12] = 0x50; tcp[13] = 0x10;
+    Wifi_NTR_TcpInfo info;
+    CHECK(Wifi_NTR_TcpFromIP(ip, 40, &info));
+    CHECK(info.ack == 0x89ABCDEF && info.src == 65000 && info.dst == 40992);
+    CHECK(Wifi_NTR_TcpIsTrackedAck(&wifi, &info));
+    CHECK(Wifi_NTR_TransmitFunctionLink(ethernet, sizeof(ethernet)) == 0);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_ACK_QUEUED] == 1);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_ACK_VALUE] == 0x89ABCDEF);
+    const u8 *queued = wifi.txbufData + 4 + sizeof(Wifi_TxHeader);
+    CHECK(Wifi_NTR_TcpFromWifi(queued, 24 + 8 + 8 + 40 + 8, true, &info));
+    CHECK(info.ack == 0x89ABCDEF);
+    // Failed enqueue, unrelated connection, SYN/RST and malformed/fragmented
+    // IP packets must not be reported as a queued ACK for this flow.
+    wifi.txbufWrite = WIFI_TXBUFFER_SIZE - 4;
+    CHECK(Wifi_NTR_TransmitFunctionLink(ethernet, sizeof(ethernet)) == -1);
+    CHECK(wifi.stats[WSTAT_NTR_TCP_ACK_QUEUED] == 1);
+    info.src--;
+    CHECK(!Wifi_NTR_TcpIsTrackedAck(&wifi, &info));
+    info.src++; info.flags |= 2;
+    CHECK(!Wifi_NTR_TcpIsTrackedAck(&wifi, &info));
+    for (unsigned len = 0; len < 40; ++len)
+        CHECK(!Wifi_NTR_TcpFromIP(ip, len, &info));
+    ip[6] = 0x20;
+    CHECK(!Wifi_NTR_TcpFromIP(ip, 40, &info));
+    ip[6] = 0; tcp[12] = 0xF0;
+    CHECK(!Wifi_NTR_TcpFromIP(ip, 40, &info));
 }
 
 int main(void)
 {
+    test_tcp_diagnostics();
     for (size_t len = 332; len <= 339; ++len) {
         test_tx_queue(AP_SECURITY_OPEN, len);
         test_tx_queue(AP_SECURITY_WEP, len);

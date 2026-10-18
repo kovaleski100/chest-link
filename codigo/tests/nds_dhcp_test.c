@@ -156,6 +156,96 @@ static void run_exchange(bool broadcast)
     CHECK(ip4_addr_get_u32(netif_ip4_netmask(&interface)) == PP_HTONL(0xffffff00));
     CHECK(ip4_addr_get_u32(ip_2_ip4(dns_getserver(0))) == PP_HTONL(0x0a000001));
 }
+
+static unsigned tcp_received, tcp_acks;
+static err_t receive_tcp(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t error)
+{
+    (void)arg;
+    CHECK(error == ERR_OK && p != NULL);
+    if (p) {
+        tcp_received += p->tot_len;
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+    }
+    return ERR_OK;
+}
+static err_t capture_tcp(struct netif *n, struct pbuf *p, const ip4_addr_t *destination)
+{
+    (void)n; (void)destination;
+    u8 headers[40];
+    CHECK(p->tot_len >= sizeof(headers));
+    pbuf_copy_partial(p, headers, sizeof(headers), 0);
+    if (headers[9] == 6 && (headers[33] & TCP_ACK)) ++tcp_acks;
+    return ERR_OK;
+}
+static void test_tcp_ack(void)
+{
+    // Exercise the real tcp_input/receive/output path with a single data
+    // segment and no timer advance or second segment. Only NTR WPA2 must ACK
+    // immediately; WEP, open networks and DSi retain their normal policy.
+    netif_output_fn previous_output = interface.output;
+    interface.output = capture_tcp;
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        wifi.curAp.security_type = mode == 1 ? AP_SECURITY_WEP :
+                                   mode == 2 ? AP_SECURITY_OPEN : AP_SECURITY_WPA2;
+        wifi.reqFlags = mode == 3 ? WFLAG_REQ_DSI_MODE : 0;
+        struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+        CHECK(pcb != NULL);
+        ip_addr_set_ip4_u32(&pcb->local_ip, PP_HTONL(0x0a000019));
+        ip_addr_set_ip4_u32(&pcb->remote_ip, PP_HTONL(0x0a000001));
+        pcb->local_port = 65000; pcb->remote_port = 40992;
+        pcb->state = ESTABLISHED; pcb->rcv_nxt = 100;
+        pcb->rcv_ann_right_edge = pcb->rcv_nxt + pcb->rcv_wnd;
+        TCP_REG_ACTIVE(pcb);
+        tcp_recv(pcb, receive_tcp);
+
+        u8 frame[32 + 20 + 20 + 512] = {0};
+        IEEE_DataFrameHeader *ieee = (void *)frame;
+        ieee->frame_control = TYPE_DATA | FC_FROM_DS;
+        memcpy(ieee->addr_1, ds, 6); memcpy(ieee->addr_2, ap, 6);
+        memcpy(ieee->addr_3, ap, 6);
+        const u8 snap[] = {0xaa, 0xaa, 3, 0, 0, 0, 8, 0};
+        memcpy(frame + 24, snap, sizeof(snap));
+        u8 *ip = frame + 32;
+        const unsigned ip_length = sizeof(frame) - 32;
+        ip[0] = 0x45; ip[2] = (u8)(ip_length >> 8); ip[3] = (u8)ip_length;
+        ip[8] = 64; ip[9] = 6;
+        ip[12] = 10; ip[15] = 1; ip[16] = 10; ip[19] = 25;
+        u16 checksum = inet_chksum(ip, 20);
+        memcpy(ip + 10, &checksum, 2);
+        struct tcp_hdr *tcp = (void *)(ip + 20);
+        tcp->src = lwip_htons(pcb->remote_port); tcp->dest = lwip_htons(pcb->local_port);
+        tcp->seqno = lwip_htonl(pcb->rcv_nxt); tcp->ackno = lwip_htonl(pcb->lastack);
+        TCPH_HDRLEN_FLAGS_SET(tcp, 5, TCP_ACK | TCP_PSH);
+        tcp->wnd = lwip_htons(4096);
+        struct pbuf *payload = pbuf_alloc(PBUF_RAW, 20 + 512, PBUF_RAM);
+        CHECK(payload != NULL);
+        pbuf_take(payload, tcp, 20 + 512);
+        tcp->chksum = inet_chksum_pseudo(payload, 6, 20 + 512,
+                                       ip_2_ip4(&pcb->remote_ip), ip_2_ip4(&pcb->local_ip));
+        pbuf_free(payload);
+        u8 original[sizeof(frame)];
+        memcpy(original, frame, sizeof(frame));
+        tcp_received = tcp_acks = 0;
+        Wifi_NTR_SendPacketToLwip(frame, sizeof(frame));
+        CHECK(tcp_received == 512);
+        CHECK(tcp_acks == (mode == 0 ? 1u : 0u));
+        if (mode == 0) {
+            CHECK(wifi.stats[WSTAT_NTR_TCP_INPUT_PACKETS] == 1);
+            CHECK(wifi.stats[WSTAT_NTR_TCP_INPUT_SEQ] == 100);
+            CHECK(wifi.stats[WSTAT_NTR_TCP_INPUT_EXPECTED] == 100);
+            // Diagnostics/ACK policy must not bypass a bad TCP checksum.
+            memcpy(frame, original, sizeof(frame));
+            frame[sizeof(frame) - 1] ^= 1;
+            Wifi_NTR_SendPacketToLwip(frame, sizeof(frame));
+            CHECK(tcp_received == 512 && tcp_acks == 1);
+            CHECK(wifi.stats[WSTAT_NTR_TCP_INPUT_PACKETS] == 1);
+        }
+        tcp_abort(pcb);
+    }
+    interface.output = previous_output;
+    wifi.reqFlags = 0;
+}
 int main(void)
 {
     wifi.curAp.security_type = AP_SECURITY_WPA2;
@@ -165,8 +255,9 @@ int main(void)
     netif_set_default(&interface); netif_set_up(&interface);
     run_exchange(false); // IPv4 unicast Offer/ACK before an address is assigned.
     run_exchange(true); // Broadcast Offer/ACK is also accepted.
+    test_tcp_ack();
     dhcp_release_and_stop(&interface); dhcp_cleanup(&interface);
     netif_remove(&interface);
-    printf("DS DHCP exchange: %u checks, %u failures\n", checks, failures);
+    printf("DS DHCP/TCP receive: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

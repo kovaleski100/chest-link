@@ -121,6 +121,31 @@ static const u8 *last_eapol(void)
     return transmitted + sizeof(Wifi_TxHeader) + 32;
 }
 
+static size_t make_qos_frame(u8 *frame, bool group, u8 tid, u64 pn,
+                             const u8 *payload, size_t payload_len)
+{
+    const size_t header_len = HDR_DATA_MAC_SIZE + 2;
+    memset(frame, 0, 1024);
+    const u16 frame_control = TYPE_QOS_DATA | FC_FROM_DS | FC_PROTECTED_FRAME;
+    frame[0] = frame_control & 0xFF;
+    frame[1] = frame_control >> 8;
+    if (group) memset(frame + 4, 0xFF, 6);
+    else memcpy(frame + 4, ds_mac, 6);
+    memcpy(frame + 10, ap_mac, 6);
+    memcpy(frame + 16, ap_mac, 6);
+    frame[24] = (tid & 0x0F) | 0xA0; // Non-TID QoS bits must not enter AAD.
+    u8 *ccmp = frame + header_len;
+    write_ccmp_header(ccmp, pn);
+    if (group) ccmp[3] |= (wpa_gtk.keyidx & 3) << 6;
+    u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE], nonce[13];
+    const size_t aad_len = make_ccmp_aad(frame, aad);
+    make_ccmp_nonce(frame, ccmp, nonce);
+    const u8 *key = group ? wpa_gtk.key : expected_ptk + 32;
+    CHECK(Wifi_NTR_CcmpEncryptAad(key, nonce, aad, aad_len, payload,
+        payload_len, ccmp + 8, ccmp + 8 + payload_len));
+    return header_len + 16 + payload_len;
+}
+
 static void test_handshake(void)
 {
     u8 frame[1024];
@@ -163,19 +188,22 @@ static void test_handshake(void)
 
     // Lost M4: resend without reinstalling keys/resetting replay protection.
     wpa_tx_pn = 123;
-    wpa_pairwise_rx_pn = 45;
-    wpa_group_rx_pn = 67;
+    wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] = 45;
+    wpa_group_rx_pn[WPA_CCMP_NON_QOS_TID] = 67;
     before = transmissions;
     receive(frame, length);
     CHECK(transmissions == before + 1);
-    CHECK(wpa_tx_pn == 123 && wpa_pairwise_rx_pn == 45 && wpa_group_rx_pn == 67);
+    CHECK(wpa_tx_pn == 123 &&
+          wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 45 &&
+          wpa_group_rx_pn[WPA_CCMP_NON_QOS_TID] == 67);
 
     // A fresh association needs fresh temporal keys but the original PMK.
     Wifi_NTR_WpaAssociationComplete();
     CHECK(!Wifi_NTR_WpaIsReady());
     CHECK(all_zero(&wpa_ptk, sizeof(wpa_ptk)));
     CHECK(all_zero(&wpa_gtk, sizeof(wpa_gtk)));
-    CHECK(wpa_tx_pn == 0 && wpa_pairwise_rx_pn == 0 && wpa_group_rx_pn == 0);
+    CHECK(wpa_tx_pn == 0 && all_zero(wpa_pairwise_rx_pn, sizeof(wpa_pairwise_rx_pn)) &&
+          all_zero(wpa_group_rx_pn, sizeof(wpa_group_rx_pn)));
     length = make_key_frame(frame, 0x008a, 0, 0x40, NULL, 0, NULL);
     receive(frame, length);
     u8 reassociated_ptk[64];
@@ -219,18 +247,19 @@ static void test_encrypted_receive(void)
     memcpy(protected_frame, frame, 24);
     protected_frame[1] |= 0x40;
     write_ccmp_header(protected_frame + 24, 1);
-    u8 aad[22], nonce[13];
-    make_ccmp_aad(protected_frame, aad);
+    u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE], nonce[13];
+    size_t aad_len = make_ccmp_aad(protected_frame, aad);
     make_ccmp_nonce(protected_frame, protected_frame + 24, nonce);
-    CHECK(Wifi_NTR_CcmpEncrypt(expected_ptk + 32, nonce, aad, frame + 24,
-                               length - 24, protected_frame + 32,
-                               protected_frame + length + 8));
+    CHECK(Wifi_NTR_CcmpEncryptAad(expected_ptk + 32, nonce, aad, aad_len,
+                                  frame + 24, length - 24,
+                                  protected_frame + 32,
+                                  protected_frame + length + 8));
     unsigned before = transmissions;
     receive(protected_frame, length + 16);
     CHECK(transmissions == before + 1);
     CHECK(read_be16(last_eapol() + 5) == 0x0302);
     CHECK(read_be64(last_eapol() + 9) == 2);
-    CHECK(wpa_pairwise_rx_pn == 1);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 1);
     before = transmissions;
     receive(protected_frame, length + 16); // Repeated CCMP PN is rejected.
     CHECK(transmissions == before);
@@ -239,9 +268,9 @@ static void test_encrypted_receive(void)
     const u8 payload[] = {0xaa, 0xaa, 3, 0, 0, 0, 8, 0, 0x45, 0, 0, 20};
     write_ccmp_header(protected_frame + 24, 2);
     make_ccmp_nonce(protected_frame, protected_frame + 24, nonce);
-    CHECK(Wifi_NTR_CcmpEncrypt(expected_ptk + 32, nonce, aad, payload,
-                               sizeof(payload), protected_frame + 32,
-                               protected_frame + 32 + sizeof(payload)));
+    CHECK(Wifi_NTR_CcmpEncryptAad(expected_ptk + 32, nonce, aad, aad_len,
+                                  payload, sizeof(payload), protected_frame + 32,
+                                  protected_frame + 32 + sizeof(payload)));
     length = 40 + sizeof(payload);
     size_t output_len = 0;
     CHECK(Wifi_NTR_WpaProcessRx(protected_frame, length, output,
@@ -249,7 +278,7 @@ static void test_encrypted_receive(void)
     CHECK(output_len == 24 + sizeof(payload));
     CHECK(!(output[1] & 0x40));
     CHECK(memcmp(output + 24, payload, sizeof(payload)) == 0);
-    CHECK(wpa_pairwise_rx_pn == 2);
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 2);
     receive(protected_frame, length); // Data replay is rejected too.
 
     // RX queue decrypts in place, moving the plaintext eight bytes to the
@@ -264,11 +293,11 @@ static void test_encrypted_receive(void)
         else memcpy(protected_frame + 4, ds_mac, 6);
         write_ccmp_header(protected_frame + 24, 3);
         if (group) protected_frame[27] |= (wpa_gtk.keyidx & 3) << 6;
-        make_ccmp_aad(protected_frame, aad);
+        aad_len = make_ccmp_aad(protected_frame, aad);
         make_ccmp_nonce(protected_frame, protected_frame + 24, nonce);
         const u8 *key = group ? wpa_gtk.key : expected_ptk + 32;
-        CHECK(Wifi_NTR_CcmpEncrypt(key, nonce, aad, dhcp_payload,
-            sizeof(dhcp_payload), protected_frame + 32,
+        CHECK(Wifi_NTR_CcmpEncryptAad(key, nonce, aad, aad_len,
+            dhcp_payload, sizeof(dhcp_payload), protected_frame + 32,
             protected_frame + 32 + sizeof(dhcp_payload)));
         CHECK(Wifi_NTR_WpaProcessRx(protected_frame,
             40 + sizeof(dhcp_payload), protected_frame,
@@ -277,6 +306,36 @@ static void test_encrypted_receive(void)
         CHECK(memcmp(protected_frame + 24, dhcp_payload, sizeof(dhcp_payload)) == 0);
         CHECK(!(protected_frame[1] & 0x40));
     }
+
+    // QoS CCMP uses the TID in both its nonce and AAD, and maintains replay
+    // state independently for each TID.
+    const u8 qos_payload[28] = {
+        0xaa, 0xaa, 3, 0, 0, 0, 8, 0, 0x45, 0, 0, 20
+    };
+    length = make_qos_frame(protected_frame, false, 5, 1, qos_payload,
+                            sizeof(qos_payload));
+    CHECK(Wifi_NTR_WpaProbeRxSize(protected_frame, length) == length);
+    CHECK(Wifi_NTR_WpaProcessRx(protected_frame, length, output,
+        sizeof(output), &output_len));
+    CHECK(output_len == 26 + sizeof(qos_payload));
+    CHECK(memcmp(output + 26, qos_payload, sizeof(qos_payload)) == 0);
+    CHECK(wpa_pairwise_rx_pn[5] == 1);
+    CHECK(wpa_pairwise_rx_pn[6] == 0);
+
+    // Changing TID without recomputing CCMP must fail authentication and must
+    // not advance the new TID's replay state.
+    protected_frame[24] = 6 | 0xA0;
+    CHECK(!Wifi_NTR_WpaProcessRx(protected_frame, length, output,
+        sizeof(output), &output_len));
+    CHECK(wpa_pairwise_rx_pn[6] == 0);
+    length = make_qos_frame(protected_frame, false, 6, 1, qos_payload,
+                            sizeof(qos_payload));
+    CHECK(Wifi_NTR_WpaProcessRx(protected_frame, length, output,
+        sizeof(output), &output_len));
+    CHECK(wpa_pairwise_rx_pn[6] == 1);
+    CHECK(!Wifi_NTR_WpaProcessRx(protected_frame, length, output,
+        sizeof(output), &output_len)); // Replay on TID 6.
+    CHECK(wpa_pairwise_rx_pn[5] == 1);
     Wifi_NTR_WpaReset();
 }
 
@@ -303,6 +362,20 @@ static void test_ccmp(void)
     mic[0] ^= 1;
     CHECK(!Wifi_NTR_CcmpDecrypt(key, nonce, aad, cipher, length, mic, decoded));
     CHECK(all_zero(decoded, length));
+
+    const u8 qos_plain[] = "QoS CCMP test vector";
+    u8 qos_aad[WIFI_NTR_CCMP_AAD_MAX_SIZE];
+    for (unsigned i = 0; i < sizeof(qos_aad); ++i) qos_aad[i] = i;
+    CHECK(unhex(expected,
+        "475be7a8104ab7d27ae356d4e91468bd80746b50f19e86e5f0b46aeb") ==
+        sizeof(qos_plain) - 1 + 8);
+    CHECK(Wifi_NTR_CcmpEncryptAad(key, nonce, qos_aad, sizeof(qos_aad),
+        qos_plain, sizeof(qos_plain) - 1, cipher, mic));
+    CHECK(memcmp(cipher, expected, sizeof(qos_plain) - 1) == 0);
+    CHECK(memcmp(mic, expected + sizeof(qos_plain) - 1, 8) == 0);
+    CHECK(Wifi_NTR_CcmpDecryptAad(key, nonce, qos_aad, sizeof(qos_aad),
+        cipher, sizeof(qos_plain) - 1, mic, decoded));
+    CHECK(memcmp(decoded, qos_plain, sizeof(qos_plain) - 1) == 0);
 }
 
 static void test_hardware_rx_crop(void)
@@ -320,10 +393,11 @@ static void test_hardware_rx_crop(void)
     wire[1] |= 0x40;
     write_ccmp_header(wire + 24, 1);
     u8 payload[344] = {0xaa, 0xaa, 3, 0, 0, 0, 8, 0, 0x45};
-    u8 aad[22], nonce[13];
-    make_ccmp_aad(wire, aad); make_ccmp_nonce(wire, wire + 24, nonce);
-    CHECK(Wifi_NTR_CcmpEncrypt(expected_ptk + 32, nonce, aad, payload,
-        sizeof(payload), wire + 32, wire + 32 + sizeof(payload)));
+    u8 aad[WIFI_NTR_CCMP_AAD_MAX_SIZE], nonce[13];
+    const size_t aad_len = make_ccmp_aad(wire, aad);
+    make_ccmp_nonce(wire, wire + 24, nonce);
+    CHECK(Wifi_NTR_CcmpEncryptAad(expected_ptk + 32, nonce, aad, aad_len,
+        payload, sizeof(payload), wire + 32, wire + 32 + sizeof(payload)));
     const size_t wire_length = 24 + 8 + sizeof(payload) + 8 + 4;
     size_t output_length;
     // The previous register value excludes 12 bytes instead of FCS alone.
@@ -331,7 +405,7 @@ static void test_hardware_rx_crop(void)
     CHECK(!Wifi_NTR_WpaProcessRx(wire, wire_length - 12, output,
         sizeof(output), &output_length));
     CHECK(WifiData->stats[WSTAT_NTR_CCMP_MIC_FAILED] == 1);
-    CHECK(wpa_pairwise_rx_pn == 0); // Bad MIC must not advance replay state.
+    CHECK(wpa_pairwise_rx_pn[WPA_CCMP_NON_QOS_TID] == 0); // Bad MIC must not advance replay state.
     const unsigned crop = (Wifi_NTR_RxCropForSecurity(AP_SECURITY_WPA2) >> 8) * 2;
     CHECK(Wifi_NTR_WpaProcessRx(wire, wire_length - crop, output,
         sizeof(output), &output_length));

@@ -6,6 +6,7 @@
 #include <3ds.h>
 #include <arpa/inet.h>
 #include <cerrno>
+#include <cstring>
 #include <cstdlib>
 #include <malloc.h>
 #include <sys/ioctl.h>
@@ -18,12 +19,15 @@ bool acReady = false, socReady = false, sampled = false;
 uint64_t lastSample = 0;
 void *socBuffer = nullptr;
 chestlink::NetworkStatus state;
-chestlink::InternetProbeSchedule internet;
-int probeSocket = -1;
+chestlink::ServerProbeSchedule serverSchedule;
+int serverSocket = -1;
+uint64_t nextServerProbeSend = 0;
+uint32_t serverProbeNonce = 0, serverProbeSequence = 0;
+constexpr uint16_t SERVER_DISCOVERY_PORT = 40992;
 
-void closeProbe() {
-  if (probeSocket >= 0) ::close(probeSocket);
-  probeSocket = -1;
+void closeServerProbe() {
+  if (serverSocket >= 0) ::close(serverSocket);
+  serverSocket = -1;
 }
 
 void ensureSockets() {
@@ -37,55 +41,68 @@ void ensureSockets() {
   socReady = true;
 }
 
-sockaddr_in probeAddress() {
-  sockaddr_in peer{};
-  peer.sin_family = AF_INET;
-  peer.sin_port = htons(443);
-  peer.sin_addr.s_addr = inet_addr("1.1.1.1");
-  return peer;
+std::string ipv4Text(uint32_t value) {
+  in_addr address{};
+  address.s_addr = value;
+  char buffer[INET_ADDRSTRLEN]{};
+  return inet_ntop(AF_INET, &address, buffer, sizeof(buffer)) ? buffer : "";
 }
 
-void pollProbe(uint64_t now) {
-  if (internet.due(now)) {
-    internet.begin(now);
-    probeSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    int nonblocking = 1;
-    if (probeSocket < 0 || ioctl(probeSocket, FIONBIO, &nonblocking) < 0) {
-      closeProbe(); internet.finish(false, now); return;
+void sendServerDiscovery(uint64_t now) {
+  if (serverSocket < 0 || now < nextServerProbeSend) return;
+  uint8_t request[12] = {'C', 'L', 'D', 'S', 'D', 'I', 'S', 'C'};
+  request[8] = static_cast<uint8_t>(serverProbeNonce >> 24);
+  request[9] = static_cast<uint8_t>(serverProbeNonce >> 16);
+  request[10] = static_cast<uint8_t>(serverProbeNonce >> 8);
+  request[11] = static_cast<uint8_t>(serverProbeNonce);
+  sockaddr_in target{};
+  target.sin_family = AF_INET;
+  target.sin_port = htons(SERVER_DISCOVERY_PORT);
+  target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+  (void)sendto(serverSocket, request, sizeof(request), 0,
+               reinterpret_cast<const sockaddr *>(&target), sizeof(target));
+  nextServerProbeSend = now + 350;
+}
+
+void pollServerProbe(uint64_t now) {
+  if (serverSchedule.due(now)) {
+    serverSchedule.begin(now);
+    serverProbeNonce = (static_cast<uint32_t>(now) ^ 0xc1a0d5e3u) +
+                       (++serverProbeSequence * 0x9e3779b9u);
+    serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int broadcast = 1, nonblocking = 1;
+    if (serverSocket < 0 ||
+        setsockopt(serverSocket, SOL_SOCKET, SO_BROADCAST, &broadcast,
+                   sizeof(broadcast)) < 0 ||
+        ioctl(serverSocket, FIONBIO, &nonblocking) < 0) {
+      closeServerProbe(); serverSchedule.finish({}, now); return;
     }
-    // Same read-only TCP reachability indicator as DS. It does not validate
-    // DNS/TLS or send credentials or bank contents to this public resolver.
-    auto peer = probeAddress();
-    int result = ::connect(probeSocket, reinterpret_cast<sockaddr *>(&peer), sizeof(peer));
-    if (!result) {
-      closeProbe(); internet.finish(true, now); return;
-    }
-    if (errno != EINPROGRESS && errno != EWOULDBLOCK && errno != EAGAIN) {
-      closeProbe(); internet.finish(false, now); return;
-    }
+    nextServerProbeSend = 0;
   }
-  if (!internet.pending() || probeSocket < 0) return;
-  if (internet.expired(now)) {
-    closeProbe(); internet.finish(false, now); return;
+  if (!serverSchedule.pending() || serverSocket < 0) return;
+  if (serverSchedule.expired(now)) {
+    closeServerProbe(); serverSchedule.finish({}, now); return;
   }
-  fd_set writable, errors;
-  FD_ZERO(&writable); FD_ZERO(&errors);
-  FD_SET(probeSocket, &writable); FD_SET(probeSocket, &errors);
-  timeval immediate{0, 0};
-  const int result = select(probeSocket + 1, nullptr, &writable, &errors, &immediate);
-  if ((result < 0 && errno == EINTR) || !result) return;
-  int error = 0;
-  socklen_t length = sizeof(error);
-  const int queried = result > 0
-      ? getsockopt(probeSocket, SOL_SOCKET, SO_ERROR, &error, &length) : -1;
-  if (!queried && error == -26) {
-    // Native SOC can retain its internal EINPROGRESS after TCP established.
-    auto peer = probeAddress();
-    int retry = ::connect(probeSocket, reinterpret_cast<sockaddr *>(&peer), sizeof(peer));
-    if (!retry || (retry < 0 && errno == EISCONN)) error = 0;
+  sendServerDiscovery(now);
+  uint8_t response[12]{};
+  sockaddr_in source{};
+  socklen_t sourceLength = sizeof(source);
+  const ssize_t received = recvfrom(serverSocket, response, sizeof(response), 0,
+      reinterpret_cast<sockaddr *>(&source), &sourceLength);
+  if (received < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return;
+    closeServerProbe(); serverSchedule.finish({}, now); return;
   }
-  const bool success = result > 0 && !queried && !error;
-  closeProbe(); internet.finish(success, now);
+  if (received != sizeof(response) || std::memcmp(response, "CLPCDISC", 8) ||
+      ntohs(source.sin_port) != SERVER_DISCOVERY_PORT || !source.sin_addr.s_addr)
+    return;
+  if (response[8] != static_cast<uint8_t>(serverProbeNonce >> 24) ||
+      response[9] != static_cast<uint8_t>(serverProbeNonce >> 16) ||
+      response[10] != static_cast<uint8_t>(serverProbeNonce >> 8) ||
+      response[11] != static_cast<uint8_t>(serverProbeNonce))
+    return;
+  const std::string address = ipv4Text(source.sin_addr.s_addr);
+  closeServerProbe(); serverSchedule.finish(address, now);
 }
 } // namespace
 
@@ -113,10 +130,12 @@ void refresh3DSNetworkStatus(bool force) {
       }
     }
     state = nativeNetworkSnapshot(statusOK, status, ssidOK, ssid, length, ip);
-    if (internet.link(state.ssid, state.ip, state.ipv4Ready)) closeProbe();
+    if (serverSchedule.link(state.ssid, state.ip, state.ipv4Ready))
+      closeServerProbe();
   }
-  pollProbe(now);
-  state.internet = internet.result();
+  pollServerProbe(now);
+  state.server = serverSchedule.result();
+  state.serverIP = serverSchedule.serverIP();
   gui::setNetworkStatus(state);
 }
 
@@ -132,11 +151,11 @@ void require3DSNetwork() {
 const chestlink::NetworkStatus &network3DSStatus() { return state; }
 
 void shutdown3DSNetwork() {
-  closeProbe();
+  closeServerProbe();
   if (socReady) socExit();
   if (socBuffer) free(socBuffer);
   if (acReady) acExit();
   socReady = acReady = sampled = false; socBuffer = nullptr;
-  state = {}; internet = {};
+  state = {}; serverSchedule = {};
 }
 } // namespace platform_detail

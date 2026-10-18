@@ -13,6 +13,12 @@
 
 #include "common/random.h"
 
+// The NTR WPA2 receiver admits one recovered frame at a time. Let it ACK
+// each TCP data segment promptly when the PC uses a single-segment window.
+int dswifi_tcp_inpacket_ack(void *pcb, const void *header, unsigned payload_bytes);
+#define LWIP_HOOK_TCP_INPACKET_PCB(pcb, hdr, optlen, opt1len, opt2, p) \
+    dswifi_tcp_inpacket_ack((pcb), (hdr), (p)->tot_len)
+
 // Standard library settings
 // =========================
 

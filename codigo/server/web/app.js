@@ -3,12 +3,124 @@
 const $ = id => document.getElementById(id);
 const ALL_SLOTS = 0x3fffffff;
 const token = location.hash.slice(1);
+const savedMainView = (() => {
+  try { return sessionStorage.getItem('chest-link-main-view'); }
+  catch { return null; }
+})();
 let state = {items: [], ips: []}, current = null, boxData = null, cursor = 0, boxIndex = 0;
 let masks = [], filter = 0, busy = false, hotspotBusy = false, epoch = 0, sendingTarget = 0;
 let dexData = null, dexState = null, dexGame = 'home', dexPool = 'all', dexSelected = 4, dexType = '', dexSaving = false;
-let currentView = 'boxes', nativeTab = 'pokedex', nativeRows = [], nativeSnapshot = null;
-let nativeHash = '', nativeCatalog = null, nativeEpoch = 0, nativeBusy = false;
-let nativeCompletionHash = '', nativeCompletion = null;
+let dexCatalogEpoch = 0;
+let currentView = ['boxes', 'dex', 'native'].includes(savedMainView) ? savedMainView : 'boxes';
+let nativeTab = 'pokedex', nativeRows = [], nativeSnapshot = null, nativeSelectedGame = null;
+const nativeGameChoices = {
+  1: [{id: 'red', name: 'Red', versions: ['RB']}, {id: 'blue', name: 'Blue', versions: ['RB']},
+    {id: 'yellow', name: 'Yellow', versions: ['YW']}],
+  2: [{id: 'gold', name: 'Gold', versions: ['GS']}, {id: 'silver', name: 'Silver', versions: ['GS']},
+    {id: 'crystal', name: 'Crystal', versions: ['C']}],
+  3: [{id: 'firered', name: 'FireRed', versions: ['FR', 'FRLG']},
+    {id: 'leafgreen', name: 'LeafGreen', versions: ['LG', 'FRLG']},
+    {id: 'ruby', name: 'Ruby', versions: ['RS']},
+    {id: 'sapphire', name: 'Sapphire', versions: ['RS']},
+    {id: 'emerald', name: 'Emerald', versions: ['E']}],
+  4: [{id: 'diamond', name: 'Diamond', versions: ['DP']},
+    {id: 'pearl', name: 'Pearl', versions: ['DP']},
+    {id: 'platinum', name: 'Platinum', versions: ['PT']},
+    {id: 'heartgold', name: 'HeartGold', versions: ['HG']},
+    {id: 'soulsilver', name: 'SoulSilver', versions: ['SS']}]
+};
+const nativeGameNames = Object.fromEntries(Object.values(nativeGameChoices).flat()
+  .map(game => [game.id, game.name]));
+const BADGE_LABELS = {
+  johto: [['Zephyr', 'Pena'], ['Hive', 'Colmeia'], ['Plain', 'Planície'], ['Fog', 'Névoa'],
+    ['Storm', 'Tempestade'], ['Mineral', 'Mineral'], ['Glacier', 'Glacial'], ['Rising', 'Dragão']],
+  kanto: [['Boulder', 'Pedra'], ['Cascade', 'Cascata'], ['Thunder', 'Trovão'], ['Rainbow', 'Arco-íris'],
+    ['Soul', 'Alma'], ['Marsh', 'Pântano'], ['Volcano', 'Vulcão'], ['Earth', 'Terra']]
+};
+function nativeGameLabel(id) { return nativeGameNames[id] ? `Pokémon ${nativeGameNames[id]}` : ''; }
+function nativeGenerationForVersion(version) {
+  return ({RB: 1, YW: 1, GS: 2, C: 2, FR: 3, LG: 3, FRLG: 3, RS: 3, E: 3,
+    DP: 4, PT: 4, HG: 4, SS: 4})[version] || null;
+}
+function nativeDefaultGame(version, game = '') {
+  const named = ({'Sapphire': 'sapphire', 'LeafGreen': 'leafgreen', 'SoulSilver': 'soulsilver',
+    'HeartGold': 'heartgold', 'Emerald': 'emerald', 'Ruby': 'ruby', 'FireRed': 'firered',
+    'Yellow': 'yellow', 'Crystal': 'crystal', 'Diamond': 'diamond', 'Pearl': 'pearl',
+    'Platinum': 'platinum'})[game];
+  return named || ({RB: 'red', YW: 'yellow', GS: 'gold', C: 'crystal', FR: 'firered', LG: 'leafgreen',
+    FRLG: 'firered', RS: 'ruby', E: 'emerald', DP: 'diamond', PT: 'platinum',
+    HG: 'heartgold', SS: 'soulsilver'})[version] || null;
+}
+function nativeGameMatchesVersion(gameId, version) {
+  return Object.values(nativeGameChoices).flat()
+    .some(game => game.id === gameId && game.versions.includes(version));
+}
+function nativeGameMatchesSnapshot(gameId, snapshot) {
+  if (!snapshot || !nativeGameMatchesVersion(gameId, snapshot.gameVersion)) return false;
+  const choice = nativeGameChoice(gameId);
+  const ambiguousNames = {
+    red: 'Red / Blue', blue: 'Red / Blue', gold: 'Gold / Silver', silver: 'Gold / Silver',
+    firered: 'FireRed / LeafGreen', leafgreen: 'FireRed / LeafGreen',
+    ruby: 'Ruby / Sapphire', sapphire: 'Ruby / Sapphire', diamond: 'Diamond / Pearl',
+    pearl: 'Diamond / Pearl'
+  };
+  return snapshot.game === choice?.name || snapshot.game === ambiguousNames[gameId];
+}
+function nativeGameChoice(gameId = nativeSelectedGame) {
+  return Object.values(nativeGameChoices).flat().find(game => game.id === gameId) || null;
+}
+function nativeSnapshotGameTitle(snapshot = nativeSnapshot) {
+  const choice = nativeGameChoice();
+  return nativeGameMatchesSnapshot(choice?.id, snapshot) ? choice.name : snapshot?.game || '';
+}
+function nativeGameGeneration(gameId = nativeSelectedGame) {
+  const choice = nativeGameChoice(gameId);
+  return choice ? nativeGenerationForVersion(choice.versions[0]) : null;
+}
+const nativeDexCatalogs = new Map();
+async function ensureNativeDexCatalog(gameId = nativeSelectedGame) {
+  const generation = nativeGameGeneration(gameId) ||
+    nativeGenerationForVersion(nativeSnapshot?.gameVersion);
+  if (!generation) { nativeDexCatalog = null; return null; }
+  if (nativeDexCatalogs.has(generation)) {
+    nativeDexCatalog = nativeDexCatalogs.get(generation);
+    return nativeDexCatalog;
+  }
+  const response = await fetch(`/assets/dex-gen${generation}.json`);
+  if (!response.ok) throw Error('O catálogo regional deste jogo não está disponível.');
+  const catalog = await response.json();
+  nativeDexCatalogs.set(generation, catalog);
+  nativeDexCatalog = catalog;
+  return catalog;
+}
+function renderNativeGameControls() {
+  const generation = $('native-generation-select'), game = $('native-game-select');
+  if (!generation || !game) return;
+  const selectedGeneration = nativeGameGeneration() || Number(generation.value) || 1;
+  generation.value = String(selectedGeneration);
+  game.replaceChildren();
+  for (const choice of nativeGameChoices[selectedGeneration] || []) game.add(new Option(choice.name, choice.id));
+  game.value = nativeSelectedGame && nativeGameGeneration() === selectedGeneration
+    ? nativeSelectedGame : nativeGameChoices[selectedGeneration]?.[0]?.id || '';
+}
+function showNativeNoCompatibleSave() {
+  nativeSnapshot = null;
+  nativeHash = '';
+  const select = $('native-snapshot-select');
+  select.value = '';
+  if (select.options[0]?.value === '') {
+    select.options[0].textContent = nativeSelectedGame
+      ? `Nenhum save compatível com ${nativeGameLabel(nativeSelectedGame)}` : 'Nenhum save disponível';
+  }
+  $('native-delete').disabled = true;
+  $('native-empty').hidden = nativeRows.length > 0;
+  $('native-summary').hidden = true;
+  $('native-panel').hidden = nativeRows.length === 0;
+  renderNativeGameControls();
+  renderNativePanel();
+}
+let nativeHash = '', nativeCatalog = null, nativeDexCatalog = null, nativeEpoch = 0, nativeBusy = false;
+let nativeCompletionHash = '', nativeCompletion = null, nativeDeleteHash = '';
 const professorOakFameGuide = [
   'Leia a placa do lado de fora do Laboratório do Oak, em Pallet.',
   'Fale com o Prof. Oak dentro do laboratório de Pallet.',
@@ -29,7 +141,13 @@ const nativeStoryGuides = {
   sapphire_recovered: 'Abra a Dotted Hole na Ilha Seis com Cut, recolha a Sapphire e recupere-a de Gideon no Armazém Rocket.',
   tanoby_ruins_unlocked: 'Na Sevault Canyon, resolva o puzzle de pedras da Tanoby Key usando Strength; depois visite as ruínas ao sul da Ilha Sete.',
   johto_champion: 'Vença a Elite Four de Johto e o Campeão Lance para entrar no Hall da Fama.',
-  kanto_unlocked: 'Depois de vencer a Liga de Johto, fale com o Prof. Oak em Pallet e viaje para Kanto.'
+  kanto_unlocked: 'Depois de vencer a Liga de Johto, fale com o Prof. Oak em Pallet e viaje para Kanto.',
+  regi_doors_opened: 'Encontre as inscrições em Braille nas cavernas de Hoenn e resolva os puzzles para abrir as câmaras dos Regis.',
+  frontier_unlocked: 'Vença a Liga de Hoenn e viaje até a Battle Frontier.',
+  hoenn_champion: 'Derrote a Elite Four de Hoenn e o Campeão para entrar no Hall da Fama.',
+  hoenn_national_dex: 'Depois de entrar no Hall da Fama, fale com o Professor Birch para receber a Pokédex Nacional.',
+  sinnoh_champion: 'Derrote a Elite Four de Sinnoh e o Campeão para entrar no Hall da Fama.',
+  sinnoh_national_dex: 'Entre no Hall da Fama e veja as espécies restantes da Pokédex de Sinnoh para receber a Pokédex Nacional.'
 };
 const nativeFameCheckerGuides = {
   'Professor Oak': professorOakFameGuide,
@@ -197,6 +315,7 @@ async function changeHotspot(action) {
 function setMainView(view) {
   const leftNativeView = currentView === 'native' && view === 'boxes';
   currentView = view;
+  try { sessionStorage.setItem('chest-link-main-view', view); } catch {}
   $('boxes-view').hidden = view !== 'boxes'; $('dex-view').hidden = view !== 'dex';
   $('native-view').hidden = view !== 'native';
   for (const [id, active] of [['nav-boxes', view === 'boxes'], ['nav-dex', view === 'dex'], ['nav-native', view === 'native']]) {
@@ -317,23 +436,36 @@ async function refreshNative() {
     }
     const select = $('native-snapshot-select'), oldHash = nativeHash || select.value;
     select.replaceChildren();
+    select.add(new Option(nativeSelectedGame ? `Nenhum save compatível com ${nativeGameLabel(nativeSelectedGame)}` : 'Nenhum save disponível', ''));
     for (const row of nativeRows) {
       const state = row.state === 'supported' ? `${row.game} · válido`
         : row.state === 'invalid' ? `Arquivo inválido · ${row.reason || 'estrutura ou checksum inválido'}`
           : `Não suportado · ${row.reason || 'formato desconhecido'}`;
       select.add(new Option(`${row.filename} · ${state} · ${row.sha256.slice(0, 8)}`, row.sha256));
     }
-    const chosen = nativeRows.find(row => row.sha256 === oldHash) || nativeRows.find(row => row.state === 'supported') || nativeRows[0];
+    let chosen = nativeRows.find(row => row.sha256 === oldHash &&
+      (row.state !== 'supported' || !nativeSelectedGame || nativeGameMatchesSnapshot(nativeSelectedGame, row)));
+    if (!chosen && nativeSelectedGame) {
+      chosen = nativeRows.find(row => row.state === 'supported' &&
+        nativeGameMatchesSnapshot(nativeSelectedGame, row));
+    }
+    if (!chosen && !nativeSelectedGame) chosen = nativeRows.find(row => row.state === 'supported') || nativeRows[0];
     if (!chosen) {
-      nativeHash = ''; nativeSnapshot = null; $('native-empty').hidden = false;
+      nativeHash = ''; nativeSnapshot = null; select.value = '';
+      if (nativeRows.length && nativeSelectedGame) { showNativeNoCompatibleSave(); return; }
+      $('native-empty').hidden = false; $('native-delete').disabled = true;
       $('native-summary').hidden = true; $('native-panel').hidden = true; return;
     }
-    nativeHash = chosen.sha256; select.value = nativeHash;
+    nativeHash = chosen.sha256; select.value = nativeHash; $('native-delete').disabled = false;
     if (chosen.state !== 'supported') {
       nativeSnapshot = null; $('native-empty').hidden = true; $('native-summary').hidden = true;
       $('native-panel').hidden = false; $('native-panel').replaceChildren();
       const invalid = chosen.state === 'invalid';
-      $('native-panel').append(nativeNode('h3', '', invalid ? 'Save preservado, mas inválido' : 'Save preservado, formato não suportado'), nativeNode('p', 'native-unknown-note', chosen.reason || 'Nenhum parser compatível reconheceu o arquivo.'));
+      const title = invalid ? 'Save preservado, mas inválido'
+        : 'Save preservado, formato não suportado';
+      const note = invalid ? chosen.reason || 'O arquivo não passou na validação.'
+        : chosen.reason || 'Nenhum parser compatível reconheceu o arquivo.';
+      $('native-panel').append(nativeNode('h3', '', title), nativeNode('p', 'native-unknown-note', note));
       return;
     }
     await loadNativeSnapshot(chosen.sha256, epochAtStart);
@@ -349,6 +481,12 @@ async function loadNativeSnapshot(hash, expectedEpoch = nativeEpoch) {
     const snapshot = await api('/api/native-saves/snapshot?id=' + encodeURIComponent(hash));
     if (expectedEpoch !== nativeEpoch || nativeHash !== hash) return;
     nativeSnapshot = snapshot;
+    if (!nativeSelectedGame || !nativeGameMatchesSnapshot(nativeSelectedGame, snapshot)) {
+      nativeSelectedGame = nativeDefaultGame(snapshot.gameVersion, snapshot.game);
+    }
+    renderNativeGameControls();
+    await ensureNativeDexCatalog(nativeSelectedGame);
+    if (expectedEpoch !== nativeEpoch || nativeHash !== hash) return;
     if (nativeCompletionHash !== hash) { nativeCompletionHash = ''; nativeCompletion = null; }
     $('native-empty').hidden = true; $('native-summary').hidden = false;
     $('native-panel').hidden = false; await renderNativeSummary(); await renderNativePanel();
@@ -366,24 +504,38 @@ async function getNativeCompletion(hash = nativeHash) {
 }
 async function renderNativeSummary() {
   const snapshot = nativeSnapshot, root = $('native-summary'); root.replaceChildren();
-  if (!snapshot) return;
-  const trainer = snapshot.trainer, play = trainer.playTime.value;
+  const selectedChoice = nativeGameChoice();
+  if (!snapshot || !nativeGameMatchesSnapshot(selectedChoice?.id, snapshot)) return;
+  const trainer = snapshot.trainer;
+  const fieldIsSupported = field => field?.state === 'supported' && field.value != null;
+  const generation = nativeGenerationForVersion(snapshot.gameVersion) || 0;
   let percent = '—';
-  try { percent = `${(await getNativeCompletion(snapshot.saveHash)).percent}%`; } catch {}
-  const cards = [
-    ['Treinador', trainer.name.value || 'Nome não decodificado'],
-    ['ID do Trainer Card', trainer.trainerId?.value == null ? 'Desconhecido' : String(trainer.trainerId.value).padStart(5, '0')],
-    ['Pokédex', `${snapshot.pokedex.caughtCount} capturados · ${snapshot.pokedex.seenCount} vistos`],
-    ['Badges', String(Object.values(snapshot.badges).flat().filter(row => row.acquired).length)],
-    ['Tempo de jogo', play ? `${play.hours}h ${String(play.minutes).padStart(2, '0')}m` : 'Desconhecido']
-  ];
-  root.append(nativeNode('h3', 'native-game-title', `${snapshot.game} · ${trainer.name.value || 'Treinador'}`));
+  const hasCompletion = generation > 2;
+  if (hasCompletion) {
+    try { percent = `${(await getNativeCompletion(snapshot.saveHash)).percent}%`; } catch {}
+  }
+  if (snapshot !== nativeSnapshot || !nativeGameMatchesSnapshot(nativeGameChoice()?.id, snapshot)) return;
+  const cards = [];
+  if (fieldIsSupported(trainer.name)) cards.push(['Treinador', trainer.name.value]);
+  if (fieldIsSupported(trainer.trainerId)) cards.push([
+    generation === 3 ? 'ID do Trainer Card' : 'ID do treinador',
+    String(trainer.trainerId.value).padStart(5, '0')
+  ]);
+  cards.push(['Pokédex', `${snapshot.pokedex.caughtCount} capturados · ${snapshot.pokedex.seenCount} vistos`]);
+  cards.push(['Insígnias', String(Object.values(snapshot.badges).flat().filter(row => row.acquired).length)]);
+  if (fieldIsSupported(trainer.playTime)) {
+    const play = trainer.playTime.value;
+    cards.push(['Tempo de jogo', `${play.hours}h ${String(play.minutes).padStart(2, '0')}m`]);
+  }
+  root.append(nativeNode('h3', 'native-game-title', `${nativeSnapshotGameTitle(snapshot)} · ${fieldIsSupported(trainer.name) ? trainer.name.value : 'Save carregado'}`));
   const content = nativeNode('div', 'native-summary-content');
   const player = nativeNode('div', 'native-player-portrait');
   const female = trainer.gender?.value === 'female';
   const playerSprite = nativeNode('img', 'native-player-sprite');
   playerSprite.src = `/assets/native-player-${female ? 'leaf' : 'red'}.png`;
-  playerSprite.alt = female ? 'Protagonista de FireRed, versão feminina' : 'Protagonista de FireRed, versão masculina';
+  playerSprite.alt = female ? 'Protagonista' : 'Protagonista';
+  playerSprite.hidden = generation !== 3;
+  if (playerSprite.hidden) content.classList.add('is-no-portrait');
   playerSprite.width = 160; playerSprite.height = 160; playerSprite.decoding = 'async';
   player.append(playerSprite);
   const grid = nativeNode('div', 'native-summary-grid');
@@ -404,20 +556,22 @@ async function renderNativeSummary() {
       earned: (minigames.pokemonJump?.jumpsInRow || 0) >= 200 && (minigames.dodrioBerryPicking?.berriesPicked || 0) >= 200}
   ] : [];
   const earnedStars = starCriteria.filter(item => item.earned).length;
-  const completionCard = nativeNode('div', 'native-stat native-completion-stat');
-  completionCard.append(nativeNode('span', '', 'Conclusão'));
-  const completionValue = nativeNode('div', 'native-completion-value');
-  completionValue.append(nativeNode('strong', 'native-completion-percent', percent));
-  if (isFireRed) {
-    const stars = nativeNode('div', 'native-trainer-stars');
-    stars.setAttribute('role', 'img'); stars.setAttribute('aria-label', `Trainer Card: ${earnedStars} de 4 estrelas`);
-    stars.title = starCriteria.map((item, index) => `${index + 1}. ${item.label}: ${item.earned ? 'obtida' : 'pendente'}`).join('\n');
-    for (let index = 0; index < starCriteria.length; index++) {
-      stars.append(nativeNode('span', `native-trainer-star${starCriteria[index].earned ? ' is-earned' : ''}`, '★'));
+  if (hasCompletion) {
+    const completionCard = nativeNode('div', 'native-stat native-completion-stat');
+    completionCard.append(nativeNode('span', '', 'Conclusão'));
+    const completionValue = nativeNode('div', 'native-completion-value');
+    completionValue.append(nativeNode('strong', 'native-completion-percent', percent));
+    if (isFireRed) {
+      const stars = nativeNode('div', 'native-trainer-stars');
+      stars.setAttribute('role', 'img'); stars.setAttribute('aria-label', `Trainer Card: ${earnedStars} de 4 estrelas`);
+      stars.title = starCriteria.map((item, index) => `${index + 1}. ${item.label}: ${item.earned ? 'obtida' : 'pendente'}`).join('\n');
+      for (let index = 0; index < starCriteria.length; index++) {
+        stars.append(nativeNode('span', `native-trainer-star${starCriteria[index].earned ? ' is-earned' : ''}`, '★'));
+      }
+      player.append(stars);
     }
-    player.append(stars);
+    completionCard.append(completionValue); grid.append(completionCard);
   }
-  completionCard.append(completionValue); grid.append(completionCard);
   content.append(player, grid);
   root.append(content, nativeNode('small', 'native-hash', `SHA-256 ${snapshot.saveHash}`));
   if (snapshot.comparison) {
@@ -445,7 +599,28 @@ async function renderNativeSummary() {
 async function renderNativePanel() {
   const root = $('native-panel'); root.replaceChildren();
   document.querySelectorAll('[data-native-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.nativeTab === nativeTab)));
-  if (!nativeSnapshot) return;
+  const choice = nativeGameChoice();
+  const tabNames = {pokedex: 'Pokédex', journey: 'Journey', completion: 'Completude', miscellany: 'Miscelânea', 'hall-of-fame': 'Hall da Fama'};
+  if (!nativeSnapshot) {
+    if (choice) {
+      root.append(nativeNode('h3', '', `${nativeGameLabel(choice.id)} · ${tabNames[nativeTab] || 'Native Saves'}`),
+        nativeNode('p', 'native-unknown-note', nativeRows.length
+          ? `Nenhum save compatível com ${nativeGameLabel(choice.id)} está carregado. Importe ou escolha um save deste jogo para ver o resumo e todas as abas.`
+          : `Ainda não há um save importado para ${nativeGameLabel(choice.id)}. Importe o arquivo do jogo para ver o resumo e todas as abas.`));
+    }
+    return;
+  }
+  if (!choice || !nativeGameMatchesSnapshot(choice.id, nativeSnapshot)) {
+    $('native-summary').hidden = true;
+    root.append(nativeNode('h3', '', `${nativeGameLabel(choice?.id) || nativeSnapshot.game} · ${tabNames[nativeTab] || 'Native Saves'}`),
+      nativeNode('p', 'native-unknown-note', `O save carregado é ${nativeSnapshot.game}; não há dados dele nesta seleção.`));
+    return;
+  }
+  if ((nativeGenerationForVersion(nativeSnapshot.gameVersion) || 0) <= 2 && nativeTab !== 'pokedex') {
+    root.append(nativeNode('h3', '', `${nativeSnapshotGameTitle()} · ${nativeTab === 'journey' ? 'Journey' : nativeTab === 'completion' ? 'Completude' : nativeTab === 'miscellany' ? 'Miscelânea' : 'Hall da Fama'}`),
+      nativeNode('p', 'native-unknown-note', 'Este save já tem as flags de capturado e visto da Pokédex. A leitura das outras abas para as Gerações I e II ainda não foi implementada.'));
+    return;
+  }
   if (nativeTab === 'pokedex') return renderNativeDex(root);
   if (nativeTab === 'journey') return renderNativeJourney(root);
   if (nativeTab === 'completion') return renderNativeCompletion(root);
@@ -454,9 +629,65 @@ async function renderNativePanel() {
 }
 function renderNativeMiscellany(root) {
   const data = nativeSnapshot.miscellany || {};
+  if (['RS', 'E'].includes(nativeSnapshot.gameVersion)) {
+    const rematches = data.trainerRematches || {};
+    const records = Array.isArray(rematches.items) ? rematches.items : [];
+    root.append(nativeNode('h3', '', `${nativeSnapshotGameTitle()} · Miscelânea`));
+    root.append(nativeNode('p', 'native-muted', 'O save guarda o estado atual dos registros de revanche de Hoenn. Estes flags não identificam o nome do treinador e podem mudar conforme o jogo avança.'));
+    const card = nativeNode('article', 'native-misc-card');
+    card.append(nativeNode('h4', '', 'Registros de revanche ativos'),
+      nativeNode('strong', 'native-misc-value', rematches.state === 'supported'
+        ? `${rematches.activeCount} / ${rematches.total}` : 'Indisponível'));
+    root.append(card);
+    if (records.length) {
+      const details = nativeNode('details', 'native-misc-details');
+      details.append(nativeNode('summary', '', `Ver os ${records.length} registros`));
+      const search = nativeNode('input', 'native-search');
+      search.type = 'search'; search.placeholder = 'Buscar ID do registro';
+      search.setAttribute('aria-label', 'Buscar registro de revanche por ID');
+      details.append(search);
+      const list = nativeNode('ul', 'native-misc-item-list');
+      const draw = () => {
+        list.replaceChildren();
+        const query = search.value.trim();
+        const filtered = records.filter(row => !query || String(row.trainerId).includes(query));
+        for (const row of filtered) {
+          const active = row.active === true;
+          const item = nativeNode('li', `native-misc-item${active ? ' is-found' : ''}`);
+          item.append(nativeNode('span', 'native-misc-item-mark', active ? '●' : '○'));
+          const text = nativeNode('span', 'native-misc-item-text');
+          text.append(nativeNode('strong', '', `Registro ${row.trainerId}`),
+            nativeNode('small', '', active ? 'revanche disponível no estado salvo' : 'sem revanche ativa no estado salvo'));
+          item.append(text); list.append(item);
+        }
+        if (!filtered.length) list.append(nativeNode('li', 'native-empty-inline', 'Nenhum registro corresponde à busca.'));
+      };
+      search.oninput = draw; draw(); details.append(list); root.append(details);
+    }
+    root.append(nativeNode('p', 'native-unknown-note', 'O mapa com nome e localização dos itens ocultos ainda não está disponível para Ruby, Sapphire e Emerald.'));
+    return;
+  }
+  if (['DP', 'PT', 'HG', 'SS'].includes(nativeSnapshot.gameVersion)) {
+    root.append(nativeNode('h3', '', `${nativeSnapshotGameTitle()} · Miscelânea`));
+    root.append(nativeNode('p', 'native-muted', 'Registros adicionais lidos do bloco deste jogo. Eles ficam fora do percentual de completude principal.'));
+    const points = data.battlePoints || nativeSnapshot.story?.battle_frontier?.value?.bp;
+    const card = nativeNode('article', 'native-misc-card');
+    card.append(nativeNode('h4', '', 'Battle Points'),
+      nativeNode('strong', 'native-misc-value', Number.isInteger(points?.value ?? points)
+        ? String(points.value ?? points) : 'Indisponível'));
+    root.append(card);
+    const forms = nativeSnapshot.collections || {};
+    if (forms.unownStatus === 'supported') {
+      const unown = nativeNode('article', 'native-misc-card');
+      unown.append(nativeNode('h4', '', 'Formas de Unown'),
+        nativeNode('strong', 'native-misc-value', `${forms.unownCount} / 28`));
+      root.append(unown);
+    }
+    return;
+  }
   const trainers = data.trainerBattles || {};
   const hiddenItems = data.hiddenItems || {};
-  root.append(nativeNode('h3', '', `${nativeSnapshot.game} · Miscelânea`));
+  root.append(nativeNode('h3', '', `${nativeSnapshotGameTitle()} · Miscelânea`));
   root.append(nativeNode('p', 'native-muted', 'Objetivos opcionais consultados diretamente nos flags do save. Eles ficam fora do percentual de completude principal.'));
 
   const grid = nativeNode('div', 'native-misc-grid');
@@ -542,8 +773,11 @@ function renderNativeMiscellany(root) {
 }
 function renderNativeHallOfFame(root) {
   const hall = nativeSnapshot.hallOfFame || {};
-  root.append(nativeNode('h3', '', `${nativeSnapshot.game} · Hall da Fama`));
-  root.append(nativeNode('p', 'native-muted', 'As equipes mais recentes aparecem primeiro; o jogo não grava a data de cada entrada. O save registra espécie, apelido, nível e personalidade, então a natureza pode ser calculada; item e golpes usados na Liga não ficam guardados.'));
+  const gen4 = ['DP', 'PT', 'HG', 'SS'].includes(nativeSnapshot.gameVersion);
+  root.append(nativeNode('h3', '', `${nativeSnapshotGameTitle()} · Hall da Fama`));
+  root.append(nativeNode('p', 'native-muted', gen4
+    ? 'O save registra as equipes que venceram a Liga. Cada equipe tem espécies, apelidos e níveis; a natureza é calculada pelo PID.'
+    : 'As equipes mais recentes aparecem primeiro; o jogo não grava a data de cada entrada. O save registra espécie, apelido, nível e personalidade, então a natureza pode ser calculada; item e golpes usados na Liga não ficam guardados.'));
   if (hall.state === 'unknown') {
     root.append(nativeNode('p', 'native-unknown-note', hall.reason || 'Os setores do Hall da Fama não puderam ser lidos neste save.'));
     return;
@@ -551,8 +785,8 @@ function renderNativeHallOfFame(root) {
   if (hall.state === 'partial') {
     root.append(nativeNode('p', 'native-unknown-note', 'Alguns registros do Hall da Fama têm dados inválidos e foram omitidos.'));
   }
-  const entries = Array.isArray(hall.entries) ? [...hall.entries].sort((a, b) => b.index - a.index) : [];
-  root.append(nativeNode('p', 'native-hof-count', `${hall.count ?? entries.length} ${entries.length === 1 ? 'equipe registrada' : 'equipes registradas'} · limite do jogo: 50`));
+  const entries = Array.isArray(hall.entries) ? [...hall.entries].sort((a, b) => gen4 ? a.index - b.index : b.index - a.index) : [];
+  root.append(nativeNode('p', 'native-hof-count', `${hall.count ?? entries.length} ${entries.length === 1 ? 'equipe registrada' : 'equipes registradas'} · limite do jogo: ${gen4 ? 30 : 50}`));
   if (!entries.length) {
     root.append(nativeNode('p', 'native-empty-inline', 'Nenhuma equipe registrada no Hall da Fama neste save.'));
     return;
@@ -570,7 +804,7 @@ function renderNativeHallOfFame(root) {
       const identity = nativeNode('span', 'native-hof-identity');
       identity.append(nativeNode('strong', '', mon.nickname || mon.name),
         nativeNode('small', '', `${mon.name} · Nv. ${mon.level}`),
-        nativeNode('small', 'native-hof-nature', `Natureza: ${mon.nature || 'desconhecida'}`));
+        nativeNode('small', 'native-hof-nature', `Natureza: ${mon.nature || 'desconhecida'}${mon.shiny ? ' · Brilhante' : ''}`));
       member.append(sprite, identity); team.append(member);
     }
     teamScroll.append(team); card.append(teamScroll); grid.append(card);
@@ -579,13 +813,30 @@ function renderNativeHallOfFame(root) {
 }
 function renderNativeDex(root) {
   const snapshot = nativeSnapshot, dex = snapshot.pokedex;
+  const selectedChoice = nativeGameChoice();
   const totalSpecies = dex.totalSpecies || 493;
   const nationalUnlocked = dex.nationalDex === true;
-  const dexTitle = dex.regionalSpecies && !nationalUnlocked ? 'Pokédex de Kanto' :
-    totalSpecies === 386 || dex.nationalDex === true ? 'Pokédex Nacional' : 'Pokédex';
-  const displaySpeciesCount = dex.regionalSpecies && !nationalUnlocked
-    ? dex.regionalSpecies : totalSpecies;
-  root.append(nativeNode('h3', '', `${snapshot.game} · ${dexTitle}`));
+  const isGen3 = ['FR', 'LG', 'FRLG', 'RS', 'E'].includes(snapshot.gameVersion);
+  const isGen4 = ['DP', 'PT', 'HG', 'SS'].includes(snapshot.gameVersion);
+  const regionalRegion = nativeDexCatalog?.regions.find(region =>
+    region.games.includes(selectedChoice?.id));
+  const regionalSpeciesIds = !nationalUnlocked && (isGen3 || isGen4)
+    ? (regionalRegion?.speciesIds || []) : [];
+  const dexTitle = dex.regionName ? `Pokédex de ${dex.regionName}` :
+    dex.regionalSpecies && !nationalUnlocked ? 'Pokédex de Kanto' :
+    totalSpecies === 386 || totalSpecies === 493 || dex.nationalDex === true ? 'Pokédex Nacional' : 'Pokédex';
+  const displaySpeciesIds = regionalSpeciesIds.length
+    ? regionalSpeciesIds : Array.from({length: dex.regionalSpecies && !nationalUnlocked
+        ? dex.regionalSpecies : totalSpecies}, (_, index) => index + 1);
+  if (['RB', 'GS', 'RS', 'DP'].includes(snapshot.gameVersion)) {
+    const alternatives = snapshot.gameVersion === 'RB' ? 'Red ou Blue' :
+      snapshot.gameVersion === 'GS' ? 'Gold ou Silver' :
+        snapshot.gameVersion === 'DP' ? 'Diamond ou Pearl' : 'Ruby ou Sapphire';
+    root.append(nativeNode('p', 'native-unknown-note',
+      `O formato reconhece ${alternatives}, mas não distingue os dois jogos no arquivo bruto. A opção acima associa estas flags ao jogo escolhido e aplica os dados próprios da versão.`));
+  }
+  const displayGame = nativeGameMatchesSnapshot(selectedChoice?.id, snapshot) ? selectedChoice.name : snapshot.game;
+  root.append(nativeNode('h3', '', `${displayGame} · ${dexTitle}`));
   const captured = new Set(dex.caught), seen = new Set(dex.seen);
   const observedBySpecies = new Map();
   for (const mon of snapshot.pokemon) {
@@ -593,11 +844,11 @@ function renderNativeDex(root) {
     observedBySpecies.get(mon.species).push(mon);
   }
   const nationalDex = snapshot.story.national_dex;
-  const nationalStatus = nationalDex?.state !== 'supported' ? 'estado desconhecido' :
-    nationalDex.value ? 'desbloqueada' : 'não desbloqueada';
-  const unseenCount = Array.from({length: displaySpeciesCount}, (_, index) => index + 1)
-    .filter(id => !seen.has(id) && !captured.has(id)).length;
-  root.append(nativeNode('p', 'native-muted', `${dex.caughtCount} capturados · ${dex.seenCount} vistos · ${unseenCount} não vistos · National Dex ${nationalStatus}.`));
+  const dexStatus = dex.regionName ? `Pokédex regional de ${dex.regionName}` :
+    nationalDex?.state !== 'supported' ? 'estado da National Dex desconhecido' :
+      `National Dex ${nationalDex.value ? 'desbloqueada' : 'não desbloqueada'}`;
+  const unseenCount = displaySpeciesIds.filter(id => !seen.has(id) && !captured.has(id)).length;
+  root.append(nativeNode('p', 'native-muted', `${dex.caughtCount} capturados · ${dex.seenCount} vistos · ${unseenCount} não vistos · ${dexStatus}.`));
   const legend = nativeNode('div', 'native-dex-legend');
   const legendItem = (label, kind) => {
     const item = nativeNode('span', `native-dex-legend-item ${kind}`);
@@ -607,19 +858,23 @@ function renderNativeDex(root) {
   };
   legendItem('Capturado', 'caught'); legendItem('Visto', 'seen'); legendItem('Não visto', 'unseen');
   root.append(legend);
-  root.append(nativeNode('p', 'native-dex-capture-date-note', 'O save FireRed não registra a data individual da captura; por isso ela não aparece nos cartões.'));
+  root.append(nativeNode('p', 'native-dex-capture-date-note', dex.regionName
+    ? 'O save registra as flags da Pokédex, sem data individual de visto ou captura.'
+    : 'O save não registra a data individual da captura; por isso ela não aparece nos cartões.'));
   const search = nativeNode('input', 'native-search'); search.type = 'search'; search.placeholder = 'Buscar número, espécie ou estado'; search.setAttribute('aria-label', 'Buscar espécie ou estado da Pokédex'); root.append(search);
   const list = nativeNode('div', 'native-dex-grid'); root.append(list);
   const names = nativeCatalog?.names || [];
   const draw = () => {
     list.replaceChildren();
     const query = search.value.trim().toLocaleLowerCase();
-    for (let id = 1; id <= displaySpeciesCount; id++) {
+    for (let index = 0; index < displaySpeciesIds.length; index++) {
+      const id = displaySpeciesIds[index];
+      const displayNumber = regionalSpeciesIds.length ? index + 1 : id;
       const name = names[id] || `Espécie ${id}`;
       const isCaught = captured.has(id);
       const isSeen = seen.has(id) || isCaught;
       const state = isCaught ? 'capturado' : isSeen ? 'visto' : 'não visto';
-      if (query && !String(id).includes(query) && !name.toLocaleLowerCase().includes(query) && !state.includes(query)) continue;
+      if (query && !String(displayNumber).includes(query) && !String(id).includes(query) && !name.toLocaleLowerCase().includes(query) && !state.includes(query)) continue;
       const card = nativeNode('article', `native-dex-card is-${isCaught ? 'caught' : isSeen ? 'seen' : 'unseen'}`);
       const portrait = nativeNode('span', 'native-dex-portrait');
       const sprite = nativeNode('span', `native-dex-sprite${isSeen ? '' : ' is-unseen'}`);
@@ -631,7 +886,7 @@ function renderNativeDex(root) {
       }
       const info = nativeNode('div', 'native-dex-info');
       info.append(nativeNode('strong', 'native-dex-name', name),
-        nativeNode('span', 'native-dex-number', `#${String(id).padStart(3, '0')}`),
+        nativeNode('span', 'native-dex-number', `#${String(displayNumber).padStart(3, '0')}`),
         nativeNode('span', `native-dex-state ${isCaught ? 'caught' : isSeen ? 'seen' : 'unseen'}`, state));
       card.append(portrait, info);
       const observed = observedBySpecies.get(id) || [];
@@ -644,6 +899,37 @@ function renderNativeDex(root) {
     if (!list.childElementCount) list.append(nativeNode('p', 'native-empty-inline', 'Nenhum Pokémon corresponde à busca.'));
   };
   search.oninput = draw; draw();
+}
+async function selectNativeGame(gameId) {
+  nativeSelectedGame = gameId;
+  renderNativeGameControls();
+  const choice = Object.values(nativeGameChoices).flat().find(game => game.id === gameId);
+  if (!choice) { renderNativePanel(); return; }
+  if (nativeGameMatchesSnapshot(gameId, nativeSnapshot)) {
+    $('native-summary').hidden = false;
+    $('native-panel').hidden = false;
+    try { await ensureNativeDexCatalog(gameId); }
+    catch (error) { $('native-panel').replaceChildren(nativeNode('p', 'native-error', error.message)); return; }
+    renderNativePanel();
+    return;
+  }
+  const matchingSave = nativeRows.find(row => row.sha256 === nativeHash && row.state === 'supported' &&
+    nativeGameMatchesSnapshot(gameId, row)) ||
+    nativeRows.find(row => row.state === 'supported' && nativeGameMatchesSnapshot(gameId, row));
+  if (matchingSave) {
+    $('native-snapshot-select').value = matchingSave.sha256;
+    nativeHash = matchingSave.sha256;
+    nativeSnapshot = null;
+    $('native-summary').hidden = true;
+    $('native-empty').hidden = true;
+    $('native-panel').hidden = false;
+    const epoch = ++nativeEpoch;
+    $('native-panel').replaceChildren(nativeNode('p', 'native-muted', `Carregando ${nativeGameLabel(gameId)}…`));
+    await loadNativeSnapshot(matchingSave.sha256, epoch);
+    return;
+  }
+  showNativeNoCompatibleSave();
+  renderNativePanel();
 }
 function nativePokeBallIcon() {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -669,7 +955,112 @@ function renderNativeJourney(root) {
   const item = (label, icon, state) => ({label, ...icon, state});
   const fieldState = field => field?.state !== 'supported' ? 'unknown' : field.value ? 'complete' : 'missing';
   const storyItem = (key, label, icon) => item(label, icon, fieldState(snapshot.story?.[key]));
-  root.append(nativeNode('h3', '', `${snapshot.game} · Journey`));
+  root.append(nativeNode('h3', '', `${nativeSnapshotGameTitle(snapshot)} · Journey`));
+
+  if (['RS', 'E'].includes(snapshot.gameVersion)) {
+    const badgeByName = new Map((snapshot.badges?.hoenn || []).map(badge => [badge.name, badge]));
+    const badgeLabels = {Stone: 'Pedra', Knuckle: 'Soco', Dynamo: 'Dínamo', Heat: 'Calor',
+      Balance: 'Equilíbrio', Feather: 'Pena', Mind: 'Mente', Rain: 'Chuva'};
+    nativeJourneyGroup(root, 'Insígnias de Hoenn', Object.entries(badgeLabels).map(([badge, label]) =>
+      item(label, {symbol: 'champion'}, badgeByName.has(badge)
+        ? badgeByName.get(badge).acquired ? 'complete' : 'missing' : 'unknown')));
+    nativeJourneyGroup(root, 'História de Hoenn', [
+      storyItem('pokedex_received', 'Pokédex recebida', {symbol: 'pokedex'}),
+      storyItem('game_clear', 'Liga Pokémon', {symbol: 'champion'}),
+      storyItem('national_dex', 'Pokédex Nacional', {symbol: 'pokedex'}),
+      storyItem('regi_doors_opened', 'Câmaras dos Regis abertas', {symbol: 'ruins'}),
+      ...(snapshot.gameVersion === 'E'
+        ? [storyItem('frontier_unlocked', 'Battle Frontier', {symbol: 'boat'})] : [])
+    ]);
+    const caught = new Set(snapshot.pokedex?.caught || []);
+    const hoennIds = new Set(nativeDexCatalog?.regions.find(region => region.id === 'hoenn')?.speciesIds || []);
+    const hoennCaptured = new Set([...caught].filter(id => hoennIds.has(id)));
+    const gameId = nativeSelectedGame || (snapshot.gameVersion === 'E' ? 'emerald' : 'ruby');
+    const eventIds = [151, 249, 250, 251, 385, 386].filter(id =>
+      nativeDexCatalog?.species.find(mon => mon.id === id)?.availableIn.includes(gameId));
+    nativeJourneyGroup(root, 'Pokédex e eventos', [
+      {label: 'Pokédex de Hoenn', symbol: 'pokedex',
+        state: hoennIds.size ? hoennCaptured.size >= hoennIds.size ? 'complete' : 'missing' : 'unknown',
+        meta: hoennIds.size ? `${hoennCaptured.size} / ${hoennIds.size} capturados` : 'Dex regional indisponível'},
+      ...eventIds.map(species => item(nativeCatalog?.names?.[species] || `Espécie ${species}`,
+        {pokemonSprite: species}, caught.has(species) ? 'complete' : 'missing'))
+    ]);
+    const games = completion.minigames || {};
+    if (snapshot.gameVersion === 'E') {
+      const thresholdState = (value, target) => Number.isInteger(value) && value >= 0
+        ? value >= target ? 'complete' : 'missing' : 'unknown';
+      nativeJourneyGroup(root, 'Minijogos de Emerald', [
+        item('Pokémon Jump · 200 seguidos', {symbol: 'jump'}, thresholdState(games.pokemonJump?.jumpsInRow, 200)),
+        item('Dodrio Berry Picking · 200', {symbol: 'berries'}, thresholdState(games.dodrioBerryPicking?.berriesPicked, 200))
+      ]);
+    }
+    return;
+  }
+
+  if (['DP', 'PT'].includes(snapshot.gameVersion)) {
+    const badgeByName = new Map((snapshot.badges?.sinnoh || []).map(badge => [badge.name, badge]));
+    const badgeLabels = {Coal: 'Carvão', Forest: 'Floresta', Cobble: 'Pedra', Fen: 'Pântano',
+      Relic: 'Relíquia', Mine: 'Mina', Icicle: 'Gelo', Beacon: 'Farol'};
+    nativeJourneyGroup(root, 'Insígnias de Sinnoh', Object.entries(badgeLabels).map(([badge, label]) =>
+      item(label, {symbol: 'champion'}, badgeByName.has(badge)
+        ? badgeByName.get(badge).acquired ? 'complete' : 'missing' : 'unknown')));
+    nativeJourneyGroup(root, 'História de Sinnoh', [
+      storyItem('game_clear', 'Liga Pokémon', {symbol: 'champion'}),
+      storyItem('national_dex', 'Pokédex Nacional', {symbol: 'pokedex'})
+    ]);
+    const caught = new Set(snapshot.pokedex?.caught || []);
+    const regional = new Set(nativeDexCatalog?.regions.find(region =>
+      region.games.includes(nativeSelectedGame))?.speciesIds || []);
+    const national = new Set(nativeDexCatalog?.nationalSpeciesIds ||
+      Array.from({length: 493}, (_, index) => index + 1));
+    const captureItem = (label, species) => ({
+      ...item(label, {symbol: 'pokedex'}, species.size
+        ? [...species].every(id => caught.has(id)) ? 'complete' : 'missing' : 'unknown'),
+      meta: species.size ? `${[...species].filter(id => caught.has(id)).length} / ${species.size} capturados`
+        : 'Catálogo indisponível'
+    });
+    nativeJourneyGroup(root, 'Capturas da Pokédex', [
+      captureItem('Pokédex Regional de Sinnoh', regional),
+      captureItem('Pokédex Nacional', national)
+    ]);
+    return;
+  }
+
+  if (['HG', 'SS'].includes(snapshot.gameVersion)) {
+    const renderBadges = (region, label) => {
+      const byName = new Map((snapshot.badges?.[region] || []).map(badge => [badge.name, badge]));
+      nativeJourneyGroup(root, `Insígnias de ${label}`, (BADGE_LABELS[region] || []).map(([badge, name]) =>
+        item(name, {symbol: 'champion'}, byName.has(badge)
+          ? byName.get(badge).acquired ? 'complete' : 'missing' : 'unknown')));
+    };
+    renderBadges('johto', 'Johto');
+    renderBadges('kanto', 'Kanto');
+    nativeJourneyGroup(root, 'História de Johto e Kanto', [
+      storyItem('johto_champion', 'Liga Pokémon de Johto', {symbol: 'champion'}),
+      storyItem('national_dex', 'Pokédex Nacional', {symbol: 'pokedex'}),
+      storyItem('kanto_unlocked', 'Kanto desbloqueada', {symbol: 'boat'}),
+      storyItem('red_defeated', 'Red derrotado', {symbol: 'champion'})
+    ]);
+    const caught = new Set(snapshot.pokedex?.caught || []);
+    const johto = new Set(nativeDexCatalog?.regions.find(region => region.id === 'johto')?.speciesIds || []);
+    const national = new Set(nativeDexCatalog?.nationalSpeciesIds ||
+      Array.from({length: 493}, (_, index) => index + 1));
+    const captureItem = (label, species) => ({
+      ...item(label, {symbol: 'pokedex'}, species.size
+        ? [...species].every(id => caught.has(id)) ? 'complete' : 'missing' : 'unknown'),
+      meta: species.size ? `${[...species].filter(id => caught.has(id)).length} / ${species.size} capturados`
+        : 'Catálogo indisponível'
+    });
+    nativeJourneyGroup(root, 'Capturas da Pokédex', [
+      captureItem('Pokédex Regional de Johto', johto),
+      captureItem('Pokédex Nacional', national)
+    ]);
+    const forms = snapshot.collections?.unownForms || [];
+    nativeJourneyGroup(root, 'Coleções', [item('Formas de Unown', {symbol: 'ruins'},
+      snapshot.collections?.unownStatus === 'supported'
+        ? forms.length === 28 ? 'complete' : 'missing' : 'unknown')]);
+    return;
+  }
 
   const badgeByName = new Map((snapshot.badges?.kanto || []).map(badge => [badge.name, badge]));
   const badges = [
@@ -716,6 +1107,9 @@ function renderNativeJourney(root) {
   });
   nativeJourneyGroup(root, 'Eventos de FireRed/LeafGreen', eventSpecies);
 
+  // FireRed/LeafGreen's Kanto Pokédex has 151 entries, but its in-game
+  // completion criterion excludes event-only Mew. Keep that 150-capture goal
+  // explicit here; the Pokédex catalog and native Dex view still show all 151.
   const regionalDexSpecies = new Set([...(caughtSpecies || [])].filter(species =>
     Number.isInteger(species) && species >= 1 && species <= 150));
   const nationalDexSpecies = new Set([...(caughtSpecies || [])].filter(species =>
@@ -726,7 +1120,7 @@ function renderNativeJourney(root) {
     meta: caughtSpecies ? `${captured.size} / ${total} capturas` : 'Capturas indisponíveis'
   });
   nativeJourneyGroup(root, 'Capturas da Pokédex', [
-    captureItem('Pokédex Regional', regionalDexSpecies, 150),
+    captureItem('Pokédex Regional (150, sem Mew)', regionalDexSpecies, 150),
     captureItem('Pokédex Nacional', nationalDexSpecies, 380)
   ]);
 
@@ -779,7 +1173,14 @@ async function renderNativeCompletion(root) {
   const unknownIds = new Set((report.unknown || []).map(item => item.id));
   const criterionState = id => unknownIds.has(id) ? 'unknown' : missingIds.has(id) ? 'missing' : 'complete';
   const firered = ['FR', 'LG', 'FRLG'].includes(nativeSnapshot?.gameVersion);
+  const hoenn = ['RS', 'E'].includes(nativeSnapshot?.gameVersion);
+  const sinnoh = ['DP', 'PT'].includes(nativeSnapshot?.gameVersion);
   const badgeLeaders = {
+    hoenn: {
+      Stone: ['Roxanne', 'Rustboro'], Knuckle: ['Brawly', 'Dewford'], Dynamo: ['Wattson', 'Mauville'],
+      Heat: ['Flannery', 'Lavaridge'], Balance: ['Norman', 'Petalburg'], Feather: ['Winona', 'Fortree'],
+      Mind: ['Tate e Liza', 'Mossdeep'], Rain: ['Wallace', 'Sootopolis']
+    },
     johto: {
       Zephyr: ['Falkner', 'Violet'], Hive: ['Bugsy', 'Azalea'], Plain: ['Whitney', 'Goldenrod'],
       Fog: ['Morty', 'Ecruteak'], Storm: ['Chuck', 'Cianwood'], Mineral: ['Jasmine', 'Olivine'],
@@ -789,6 +1190,11 @@ async function renderNativeCompletion(root) {
       Boulder: ['Brock', 'Pewter'], Cascade: ['Misty', 'Cerulean'], Thunder: ['Lt. Surge', 'Vermilion'],
       Rainbow: ['Erika', 'Celadon'], Soul: ['Koga', 'Fuchsia'], Marsh: ['Sabrina', 'Saffron'],
       Volcano: ['Blaine', 'Cinnabar'], Earth: ['Giovanni', 'Viridian']
+    },
+    sinnoh: {
+      Coal: ['Roark', 'Oreburgh'], Forest: ['Gardenia', 'Eterna'], Cobble: ['Maylene', 'Veilstone'],
+      Fen: ['Crasher Wake', 'Pastoria'], Relic: ['Fantina', 'Hearthome'], Mine: ['Byron', 'Canalave'],
+      Icicle: ['Candice', 'Snowpoint'], Beacon: ['Volkner', 'Sunyshore']
     }
   };
   const storyObjectives = firered ? [
@@ -802,6 +1208,14 @@ async function renderNativeCompletion(root) {
     ['ruby_recovered', 'Ruby', nativeStoryGuides.ruby_recovered],
     ['sapphire_recovered', 'Sapphire', nativeStoryGuides.sapphire_recovered],
     ['tanoby_ruins_unlocked', 'Ruínas Tanoby', nativeStoryGuides.tanoby_ruins_unlocked]
+  ] : hoenn ? [
+    ['game_clear', 'Campeão da Liga de Hoenn', nativeStoryGuides.hoenn_champion],
+    ['national_dex', 'Pokédex Nacional', nativeStoryGuides.hoenn_national_dex],
+    ...(nativeSnapshot?.gameVersion === 'E'
+      ? [['frontier_unlocked', 'Battle Frontier', nativeStoryGuides.frontier_unlocked]] : [])
+  ] : sinnoh ? [
+    ['game_clear', 'Campeão da Liga de Sinnoh', nativeStoryGuides.sinnoh_champion],
+    ['national_dex', 'Pokédex Nacional', nativeStoryGuides.sinnoh_national_dex]
   ] : [
     ['johto_champion', 'Campeão de Johto', nativeStoryGuides.johto_champion],
     ['kanto_unlocked', 'Kanto desbloqueada', nativeStoryGuides.kanto_unlocked]
@@ -818,7 +1232,8 @@ async function renderNativeCompletion(root) {
       for (const [region, badges] of Object.entries(nativeSnapshot?.badges || {})) {
         for (const badge of badges) {
           const [leader, city] = badgeLeaders[region]?.[badge.name] || [badge.name, region];
-          const label = `${region === 'johto' ? 'Johto' : 'Kanto'} · Insígnia ${badge.name}`;
+          const regionName = ({johto: 'Johto', kanto: 'Kanto', hoenn: 'Hoenn', sinnoh: 'Sinnoh'})[region] || region;
+          const label = `${regionName} · Insígnia ${badge.name}`;
           addObjective(card, label, `badge:${region}:${badge.name}`,
             `Vença ${leader} no Ginásio de ${city} e receba a Insígnia ${badge.name}.`);
         }
@@ -880,30 +1295,76 @@ async function renderNativeCompletion(root) {
 }
 function dexManualIds(game = dexGame) {
   if (!dexState) return [];
-  return dexState.mode === 'unified' ? (dexState.unified || [])
-    : game === 'home' ? Object.values(dexState.individual || {}).flat()
-    : (dexState.individual[game] || []);
+  if (game === 'home') return [
+    ...(dexState.unified || []), ...(dexState.johtoUnified || []),
+    ...(dexState.generation3Unified || []), ...(dexState.generation4Unified || []),
+    ...Object.values(dexState.individual || {}).flat(),
+    ...Object.values(dexState.johtoIndividual || {}).flat(),
+    ...Object.values(dexState.generation3Individual || {}).flat(),
+    ...Object.values(dexState.generation4Individual || {}).flat()
+  ];
+  const johto = ['gold', 'silver', 'crystal'].includes(game);
+  const gen3 = ['firered', 'leafgreen', 'ruby', 'sapphire', 'emerald'].includes(game);
+  const gen4 = ['diamond', 'pearl', 'platinum', 'heartgold', 'soulsilver'].includes(game);
+  const unified = gen4 ? dexState.generation4Unified : gen3 ? dexState.generation3Unified : johto ? dexState.johtoUnified : dexState.unified;
+  const individual = gen4 ? dexState.generation4Individual : gen3 ? dexState.generation3Individual : johto ? dexState.johtoIndividual : dexState.individual;
+  return dexState.mode === 'unified' ? (unified || []) : (individual?.[game] || []);
 }
 function dexManualCaptured(id) { return dexManualIds().includes(id); }
+function dexServerCounts() {
+  if (!dexState) return {};
+  if (dexGame === 'home') return dexState.homeServerCounts || dexState.serverCounts || {};
+  if (['gold', 'silver', 'crystal'].includes(dexGame)) return dexState.johtoServerCounts || dexState.serverCounts || {};
+  if (['firered', 'leafgreen', 'ruby', 'sapphire', 'emerald'].includes(dexGame)) return dexState.hoennServerCounts || {};
+  if (['diamond', 'pearl', 'platinum', 'heartgold', 'soulsilver'].includes(dexGame)) return dexState.sinnohServerCounts || {};
+  return dexState.serverCounts || {};
+}
 function dexServerCaptured(id) {
-  return Boolean(dexState && (dexState.homeServerCaptured || dexState.serverCaptured ||
-    Object.keys(dexState.homeServerCounts || dexState.serverCounts || {}).map(Number)).includes(id));
+  if (!dexState) return false;
+  const captured = dexGame === 'home'
+    ? (dexState.homeServerCaptured || Object.keys(dexState.homeServerCounts || {}).map(Number))
+    : ['gold', 'silver', 'crystal'].includes(dexGame)
+      ? (dexState.johtoServerCaptured || dexState.serverCaptured || [])
+      : ['firered', 'leafgreen', 'ruby', 'sapphire', 'emerald'].includes(dexGame)
+        ? (dexState.hoennServerCaptured || [])
+      : ['diamond', 'pearl', 'platinum', 'heartgold', 'soulsilver'].includes(dexGame)
+        ? (dexState.sinnohServerCaptured || [])
+      : (dexState.serverCaptured || []);
+  return captured.includes(id);
 }
 function dexCaptured(id) { return dexServerCaptured(id) || dexManualCaptured(id); }
 function dexRegion() { return dexData.regions.find(region => region.games.includes(dexGame)); }
 function dexRegionalRows() {
   if (dexGame === 'home') return dexData.species;
-  const ids = new Set(dexRegion()?.speciesIds || []);
-  return dexData.species.filter(mon => ids.has(mon.id));
+  const speciesById = new Map(dexData.species.map(mon => [mon.id, mon]));
+  return (dexRegion()?.speciesIds || []).map((id, index) => {
+    const mon = speciesById.get(id);
+    return mon ? {...mon, regionalId: index + 1} : null;
+  }).filter(Boolean);
+}
+function dexListRows() {
+  if (dexGame === 'home') return dexData.species;
+  if (dexData.generation === 3 || dexData.generation === 4) {
+    const nationalIds = new Set(dexData.nationalSpeciesIds ||
+      dexData.species.filter(mon => mon.id <= 386).map(mon => mon.id));
+    return dexData.species.filter(mon => nationalIds.has(mon.id));
+  }
+  return dexRegionalRows();
 }
 function dexCounterValues() {
   const nationalIds = new Set(dexGame === 'home'
     ? dexData.species.map(mon => mon.id)
     : (dexData.nationalSpeciesIds || dexData.species.map(mon => mon.id)));
   const regionalIds = new Set(dexRegionalRows().map(mon => mon.id));
-  const automatic = dexState.homeServerCaptured || dexState.serverCaptured || [];
-  const nationalCaptured = new Set([...automatic, ...dexManualIds('home')]);
-  const regionalCaptured = dexGame === 'home' ? nationalCaptured : new Set([...automatic, ...dexManualIds()]);
+  const automatic = dexGame === 'home' ? (dexState.homeServerCaptured || [])
+    : ['gold', 'silver', 'crystal'].includes(dexGame)
+      ? (dexState.johtoServerCaptured || [])
+      : ['firered', 'leafgreen', 'ruby', 'sapphire', 'emerald'].includes(dexGame)
+        ? (dexState.hoennServerCaptured || [])
+        : ['diamond', 'pearl', 'platinum', 'heartgold', 'soulsilver'].includes(dexGame)
+          ? (dexState.sinnohServerCaptured || []) : (dexState.serverCaptured || []);
+  const nationalCaptured = new Set([...automatic, ...dexManualIds(dexGame)]);
+  const regionalCaptured = nationalCaptured;
   return {
     regionalTotal: regionalIds.size, nationalTotal: nationalIds.size,
     regionalCaptured: [...regionalIds].filter(id => regionalCaptured.has(id)).length,
@@ -911,6 +1372,32 @@ function dexCounterValues() {
   };
 }
 function dexGameName(id) { return dexData.games.find(game => game.id === id)?.name || id; }
+function updateDexSourceLinks() {
+  if (!dexData) return;
+  const sources = dexData.sources || {};
+  if (dexData.generation === 4) {
+    $('dex-source-catalog').href = dexGame === 'platinum' ? sources.pokemonDbPlatinumDex
+      : ['heartgold', 'soulsilver'].includes(dexGame) ? sources.pokemonDbHGSSDex
+        : sources.pokemonDbDiamondPearlDex || 'https://pokemondb.net/pokedex/game/diamond-pearl';
+    $('dex-source-exclusives').href = ['heartgold', 'soulsilver'].includes(dexGame)
+      ? sources.pokemonDbHGSSVersionExclusives || 'https://pokemondb.net/heartgold-soulsilver/exclusive'
+      : sources.pokemonDbDPVersionExclusives || 'https://pokemondb.net/diamond-pearl/exclusive';
+  } else {
+    $('dex-source-catalog').href = sources.pokemonDbJohtoDex || sources.pokemonDbGen3Dex || sources.pokemonDbDex || 'https://pokemondb.net/pokedex/game/red-blue-yellow';
+    $('dex-source-exclusives').href = sources.gscVersionExclusives || sources.pokemonDbExclusives || 'https://pokemondb.net/red-blue/exclusive';
+  }
+}
+function dexDisplayNumber(mon) {
+  if (dexGame === 'home' || dexData.generation === 3) return mon.id;
+  const regionalIds = dexRegion()?.speciesIds || [];
+  const index = regionalIds.indexOf(mon.id);
+  return index >= 0 ? index + 1 : mon.id;
+}
+function dexRegionalNumber(mon) {
+  const index = (dexRegion()?.speciesIds || []).indexOf(mon.id);
+  return index >= 0 ? index + 1 : null;
+}
+function dexGenerationLabel(generation) { return generation === 1 ? 'Geração I' : generation === 2 ? 'Geração II' : generation === 3 ? 'Geração III' : 'Geração IV'; }
 function dexNode(tag, className, value) {
   const node = document.createElement(tag); if (className) node.className = className;
   if (value !== undefined) node.textContent = value; return node;
@@ -921,6 +1408,24 @@ function showDexError(message) {
 }
 function clearDexError() { $('dex-error').hidden = true; }
 function dexAvailableInGame(mon, game) { return (mon.availableIn || []).includes(game); }
+function dexExclusiveDescription(mon) {
+  if (!mon.exclusiveTo) return '';
+  const groups = dexData.generation === 1
+    ? {red: ['Red / Blue', ['red', 'blue']], blue: ['Red / Blue', ['red', 'blue']]}
+    : dexData.generation === 2
+      ? {gold: ['Gold / Silver', ['gold', 'silver']], silver: ['Gold / Silver', ['gold', 'silver']]}
+      : {ruby: ['Ruby / Sapphire', ['ruby', 'sapphire']], sapphire: ['Ruby / Sapphire', ['ruby', 'sapphire']],
+        firered: ['FireRed / LeafGreen', ['firered', 'leafgreen']], leafgreen: ['FireRed / LeafGreen', ['firered', 'leafgreen']],
+        diamond: ['Diamond / Pearl', ['diamond', 'pearl']], pearl: ['Diamond / Pearl', ['diamond', 'pearl']],
+        heartgold: ['HeartGold / SoulSilver', ['heartgold', 'soulsilver']],
+        soulsilver: ['HeartGold / SoulSilver', ['heartgold', 'soulsilver']]};
+  const group = groups[mon.exclusiveTo];
+  if (!group) return `Disponível apenas em ${dexGameName(mon.exclusiveTo)} nesta geração.`;
+  const alsoAvailable = (mon.availableIn || []).filter(game => !group[1].includes(game));
+  const alsoLabel = alsoAvailable.length
+    ? `; também disponível em ${alsoAvailable.map(dexGameName).join(', ')}` : '';
+  return `Exclusivo de ${dexGameName(mon.exclusiveTo)} no par ${group[0]}${alsoLabel}.`;
+}
 function renderGamePicker() {
   const picker = $('dex-games'); picker.replaceChildren();
   picker.dataset.catalog = dexGame === 'home' ? 'home' : 'games';
@@ -947,7 +1452,7 @@ function renderGamePicker() {
     button.onclick = () => {
       if (game.id === 'home') { dexGame = 'home'; dexPool = 'all'; }
       else { dexGame = game.id; }
-      $('dex-generation').value = dexGame === 'home' ? 'home' : '1';
+      $('dex-generation').value = dexGame === 'home' ? 'home' : String(dexData.generation);
       renderGamePicker(); renderDex();
     };
     picker.append(button);
@@ -955,13 +1460,15 @@ function renderGamePicker() {
 }
 function renderDex() {
   if (!dexData || !dexState) return;
+  updateDexSourceLinks();
   const isHome = dexGame === 'home';
-  const counts = dexState.homeServerCounts || dexState.serverCounts || {};
-  const regionalRows = dexRegionalRows();
+  const counts = dexServerCounts();
+  const listRows = dexListRows();
   const counters = dexCounterValues();
-  const available = isHome ? regionalRows : regionalRows.filter(mon => dexAvailableInGame(mon, dexGame));
-  $('dex-generation').value = isHome ? 'home' : '1';
-  $('dex-eyebrow').textContent = isHome ? 'POKÉMON HOME · CATÁLOGO NACIONAL' : 'KANTO · GERAÇÃO I';
+  const available = isHome ? listRows : listRows.filter(mon => dexAvailableInGame(mon, dexGame));
+  $('dex-generation').value = isHome ? 'home' : String(dexData.generation);
+  $('dex-eyebrow').textContent = isHome ? 'POKÉMON HOME · CATÁLOGO NACIONAL'
+    : `${dexRegion().name.toUpperCase()} · ${dexGenerationLabel(dexData.generation).toUpperCase()}`;
   $('dex-intro-copy').textContent = isHome
     ? 'Acompanhe sua coleção nacional. As espécies recebidas pelo PC e as capturas registradas contam para a Pokédex.'
     : 'Pokémon enviados ao servidor são considerados capturados automaticamente; também podes registrar capturas por jogo.';
@@ -974,7 +1481,12 @@ function renderDex() {
     : counters.nationalTotal === counters.regionalTotal
       ? `Mesmo total da Regional · ${dexRegion().name}`
       : `Escopo Nacional · espécies conhecidas até a Geração ${dexData.generation}`;
-  $('dex-list-title').textContent = isHome ? 'Pokémon HOME · catálogo nacional' : (dexPool === 'all' ? 'Pokédex regional completa' : `Disponíveis em ${dexGameName(dexGame)}`);
+  $('dex-list-title').textContent = isHome ? 'Pokémon HOME · catálogo nacional'
+    : (dexPool === 'all'
+      ? (dexData.generation >= 3 ? `Pokédex Nacional · ${dexGameName(dexGame)}` : `Pokédex de ${dexRegion().name}`)
+      : `Disponíveis em ${dexGameName(dexGame)}`);
+  document.querySelector('[data-pool="available"]').textContent = `Disponíveis no jogo · ${available.length}`;
+  document.querySelector('[data-pool="all"]').textContent = `Todos os ${listRows.length}`;
   $('dex-game-note').textContent = isHome
     ? `${counters.nationalTotal} espécies disponíveis no catálogo nacional.`
     : `${available.length} espécies podem ser obtidas em ${dexGameName(dexGame)} sem depender de troca com outra versão. A lista inclui evoluções.`;
@@ -988,8 +1500,11 @@ function renderDex() {
   document.querySelectorAll('[data-mode]').forEach(button => button.setAttribute('aria-pressed', String(!isHome && button.dataset.mode === dexState.mode)));
   const search = $('dex-search').value.trim().toLowerCase();
   const onlyExclusive = $('dex-exclusive').checked;
-  const rows = regionalRows.filter(mon => {
-    const matchesSearch = !search || mon.name.toLowerCase().includes(search) || String(mon.id).padStart(3, '0').includes(search.replace(/^#/, ''));
+  const rows = listRows.filter(mon => {
+    const searchNumber = search.replace(/^#/, '');
+    const matchesSearch = !search || mon.name.toLowerCase().includes(search) ||
+      String(mon.id).padStart(3, '0').includes(searchNumber) ||
+      String(dexDisplayNumber(mon)).padStart(3, '0').includes(searchNumber);
     const matchesType = !dexType || mon.types.includes(dexType);
     const availableInGame = !isHome && dexAvailableInGame(mon, dexGame);
     const exclusive = mon.exclusiveTo === dexGame || !availableInGame;
@@ -1007,7 +1522,7 @@ function renderDex() {
     const main = dexNode('button', 'dex-card-main'); main.type = 'button'; main.onclick = () => { dexSelected = mon.id; renderDex(); };
     const sprite = dexNode('span', 'dex-sprite'); sprite.style.cssText = spriteStyle(mon.sprite); sprite.dataset.inServer = String(inServer); sprite.dataset.captured = String(capturedState);
     const identity = dexNode('span', 'dex-card-identity');
-    identity.append(dexNode('small', 'dex-number', '#' + String(mon.id).padStart(3, '0')), dexNode('strong', '', mon.name));
+    identity.append(dexNode('small', 'dex-number', '#' + String(dexDisplayNumber(mon)).padStart(3, '0')), dexNode('strong', '', mon.name));
     const types = dexNode('span', 'dex-card-types'); mon.types.forEach(type => types.append(dexNode('i', 'type-chip', type)));
     const server = dexNode('span', 'dex-server-mark' + (inServer ? ' present' : ''), inServer ? 'No servidor' : 'Não transferido');
     main.append(sprite, identity, types, server); card.append(main);
@@ -1023,7 +1538,7 @@ function renderDex() {
 function renderDexDetail() {
   const mon = dexData.species.find(item => item.id === dexSelected); if (!mon) return;
   const isHome = dexGame === 'home';
-  const counts = dexState.homeServerCounts || dexState.serverCounts || {}, inServer = Number(counts[mon.id] || 0) > 0;
+  const counts = dexServerCounts(), inServer = Number(counts[mon.id] || 0) > 0;
   const automaticCapture = dexServerCaptured(mon.id);
   const capturedState = dexCaptured(mon.id);
   const manualCaptured = dexManualCaptured(mon.id);
@@ -1031,18 +1546,28 @@ function renderDexDetail() {
   const heading = dexNode('div', 'dex-detail-heading');
   const sprite = dexNode('span', 'dex-detail-sprite'); sprite.style.cssText = spriteStyle(mon.sprite); sprite.dataset.inServer = String(inServer); sprite.dataset.captured = String(capturedState);
   const identity = dexNode('div', 'dex-detail-identity');
-  identity.append(dexNode('span', 'eyebrow', `Nº ${String(mon.id).padStart(3, '0')} · ${mon.generation === 1 ? 'GERAÇÃO I' : 'POKÉDEX NACIONAL'}`), dexNode('h3', '', mon.name));
+  const regionalNumber = dexRegionalNumber(mon);
+  const numberLabel = isHome ? `National Dex #${String(mon.id).padStart(3, '0')}`
+    : dexData.generation >= 3
+      ? `${regionalNumber === null ? '' : `${dexRegion().name} #${String(regionalNumber).padStart(3, '0')} · `}Nacional #${String(mon.id).padStart(3, '0')}`
+      : `${dexRegion().name} #${String(dexDisplayNumber(mon)).padStart(3, '0')} · Nacional #${String(mon.id).padStart(3, '0')}`;
+  identity.append(dexNode('span', 'eyebrow', `${numberLabel} · ${dexGenerationLabel(dexData.generation)}`), dexNode('h3', '', mon.name));
   const types = dexNode('div', 'dex-detail-types'); mon.types.forEach(type => types.append(dexNode('i', 'type-chip', type)));
   identity.append(types); heading.append(sprite, identity); detail.append(heading);
   const stateLine = dexNode('div', 'dex-state-line');
   stateLine.append(dexNode('span', 'dex-server-mark' + (inServer ? ' present' : ''), inServer ? `No servidor · ${counts[mon.id]}` : (automaticCapture ? 'Recebido pelo servidor' : 'Ainda não transferido')));
+  const unifiedLabel = `todos os jogos da ${dexGenerationLabel(dexData.generation)}`;
   const captureDescription = automaticCapture
-    ? (manualCaptured ? `Capturado em ${dexState.mode === 'unified' ? 'todos os jogos' : dexGameName(dexGame)} · também recebido pelo servidor` : 'Capturado automaticamente pelo servidor')
-    : (isHome ? 'Selecione um jogo para acompanhar capturas' : (manualCaptured ? `Capturado em ${dexState.mode === 'unified' ? 'todos os jogos' : dexGameName(dexGame)}` : 'Não marcado como capturado'));
+    ? (manualCaptured ? `Capturado em ${dexState.mode === 'unified' ? unifiedLabel : dexGameName(dexGame)} · também recebido pelo servidor` : 'Capturado automaticamente pelo servidor')
+    : (isHome ? 'Selecione um jogo para acompanhar capturas' : (manualCaptured ? `Capturado em ${dexState.mode === 'unified' ? unifiedLabel : dexGameName(dexGame)}` : 'Não marcado como capturado'));
   stateLine.append(dexNode('span', 'dex-check-state', captureDescription));
   detail.append(stateLine);
-  if (!isHome && mon.exclusiveTo) detail.append(dexNode('p', 'dex-version-tag', `Exclusivo de ${dexGameName(mon.exclusiveTo)} em Red/Blue.`));
-  if (!isHome && mon.unobtainableIn.includes(dexGame)) detail.append(dexNode('p', 'dex-version-tag', `Não disponível normalmente em ${dexGameName(dexGame)}; obtenível por troca a partir de Red/Blue.`));
+  if (!isHome && mon.exclusiveTo) detail.append(dexNode('p', 'dex-version-tag', dexExclusiveDescription(mon)));
+  if (!isHome && mon.unobtainableIn.includes(dexGame)) {
+    const sources = (mon.availableIn || []).map(dexGameName);
+    const sourceText = sources.length ? `; disponível em ${sources.join(', ')}` : '; só obtível por troca de outra geração ou evento';
+    detail.append(dexNode('p', 'dex-version-tag', `Não disponível normalmente em ${dexGameName(dexGame)}${sourceText}.`));
+  }
   if (!isHome) {
     const toggleLabel = manualCaptured ? 'Desmarcar captura registrada' : (automaticCapture ? `Registrar também em ${dexState.mode === 'unified' ? 'progresso unificado' : dexGameName(dexGame)}` : 'Marcar como capturado');
     const toggle = dexNode('button', 'button ' + (manualCaptured ? 'secondary' : 'primary'), toggleLabel);
@@ -1073,7 +1598,7 @@ function renderEvolution(mon, detail) {
   const chain = dexData.evolutionChains.find(row => row.paths.some(path => path.species.includes(mon.id)));
   const paths = (chain?.paths || []).filter(path => path.species.length > 1);
   if (!paths.length) {
-    detail.append(dexNode('p', 'muted evolution-none', 'Não evolui na primeira geração.'));
+    detail.append(dexNode('p', 'muted evolution-none', `Não evolui na ${dexGenerationLabel(dexData.generation)}.`));
     return;
   }
   const speciesById = new Map(dexData.species.map(item => [item.id, item]));
@@ -1086,7 +1611,7 @@ function renderEvolution(mon, detail) {
       stage.type = 'button'; stage.title = `Ver ${stageMon.name}`;
       const sprite = dexNode('span', 'evolution-sprite'); sprite.style.cssText = spriteStyle(stageMon.sprite);
       const label = dexNode('span', 'evolution-label');
-      label.append(dexNode('small', '', '#' + String(speciesId).padStart(3, '0')), dexNode('strong', '', stageMon.name));
+      label.append(dexNode('small', '', '#' + String(dexDisplayNumber(stageMon)).padStart(3, '0')), dexNode('strong', '', stageMon.name));
       stage.append(sprite, label); stage.onclick = () => { dexSelected = speciesId; renderDex(); };
       line.append(stage);
       if (index < path.species.length - 1) {
@@ -1101,7 +1626,12 @@ function renderEvolution(mon, detail) {
 async function refreshDex() {
   if (!dexData) return;
   try { dexState = await api('/api/pokedex'); clearDexError(); renderDex(); }
-  catch { showDexError('Confira se o servidor está atualizado e tente novamente.'); }
+  catch (error) {
+    const message = error instanceof TypeError
+      ? 'Não foi possível conectar ao servidor. Confira se ele está em execução e tente novamente.'
+      : error.message || 'Não foi possível carregar o progresso da Pokédex.';
+    showDexError(message);
+  }
 }
 async function toggleDexCaptured(speciesId) {
   if (dexSaving || !dexState || dexGame === 'home') return;
@@ -1117,14 +1647,34 @@ async function changeDexMode(mode) {
   catch (error) { status(error.message, true); }
   finally { dexSaving = false; renderDex(); }
 }
-async function loadDexData() {
+async function loadDexData(generation = 1) {
+  const requestEpoch = ++dexCatalogEpoch;
   try {
-    dexData = await api('/api/pokedex/catalog');
+    const catalog = await api(`/api/pokedex/catalog?generation=${generation}`);
+    if (requestEpoch !== dexCatalogEpoch) return;
+    dexData = catalog;
+    const sources = dexData.sources || {};
+    const sourceGame = dexGame;
+    const gen4DexSource = sourceGame === 'platinum' ? sources.pokemonDbPlatinumDex
+      : ['heartgold', 'soulsilver'].includes(sourceGame) ? sources.pokemonDbHGSSDex
+        : sources.pokemonDbDiamondPearlDex;
+    $('dex-source-catalog').href = gen4DexSource || sources.pokemonDbJohtoDex || sources.pokemonDbGen3Dex || sources.pokemonDbDex || 'https://pokemondb.net/pokedex/game/red-blue-yellow';
+    $('dex-source-exclusives').href = generation === 4
+      ? (['heartgold', 'soulsilver'].includes(sourceGame) ? sources.pokemonDbHGSSVersionExclusives : sources.pokemonDbDPVersionExclusives) || 'https://pokemondb.net/diamond-pearl/exclusive'
+      : sources.gscVersionExclusives || sources.pokemonDbExclusives || 'https://pokemondb.net/red-blue/exclusive';
+    $('dex-source-encounters').href = 'https://pokeapi.co/docs/v2#pokemon-encounters';
+    $('dex-source-evolution').href = 'https://pokeapi.co/docs/v2#evolution-chains';
     renderGamePicker();
     const types = [...new Set(dexData.species.flatMap(mon => mon.types))].sort();
+    const typeSelect = $('dex-type'), previousType = dexType;
+    typeSelect.replaceChildren(new Option('Todos', ''));
     for (const type of types) $('dex-type').add(new Option(type, type));
+    dexType = types.includes(previousType) ? previousType : '';
+    typeSelect.value = dexType;
     await refreshDex();
-  } catch { showDexError('Não foi possível carregar os dados locais. Atualize a página e tente novamente.'); }
+  } catch {
+    if (requestEpoch === dexCatalogEpoch) showDexError('Não foi possível carregar os dados locais. Atualize a página e tente novamente.');
+  }
 }
 function popcount(value) { let count = 0; while (value) { count += value & 1; value >>>= 1; } return count; }
 function selectionStats() {
@@ -1214,21 +1764,62 @@ async function organize(action) {
 }
 async function importNativeSave() {
   const file = $('native-file').files?.[0], button = $('native-import'), label = $('native-import-status');
+  if (nativeBusy) return;
   if (!file || nativeBusy) { label.textContent = 'Escolha um arquivo primeiro.'; return; }
   if (!file.size || file.size > 64 * 1024 * 1024) { label.textContent = 'O arquivo deve ter entre 1 byte e 64 MiB.'; return; }
   let imported = false;
-  nativeBusy = true; button.disabled = true; label.textContent = 'Lendo e validando a cópia…';
+  nativeBusy = true; button.disabled = true; $('native-delete').disabled = true;
+  $('native-snapshot-select').disabled = true; label.textContent = 'Lendo e validando a cópia…';
   try {
-    const response = await fetch('/api/native-saves/import', {method: 'POST', headers: {Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name)}, body: file});
+    const selectedGame = nativeSelectedGame || $('native-game-select').value;
+    const headers = {Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream',
+      'X-Filename': encodeURIComponent(file.name), ...(selectedGame ? {'X-Game': selectedGame} : {})};
+    const response = await fetch('/api/native-saves/import', {method: 'POST', headers, body: file});
     const result = await response.json(); if (!response.ok) throw Error(result.error || 'Não foi possível importar o arquivo.');
-    nativeHash = result.sha256; label.textContent = result.state === 'supported'
-      ? `${result.game} validado · ${result.summary?.pokemonCount ?? result.pokemonCount ?? 0} Pokémon · original preservado.`
+    nativeHash = result.sha256; nativeSnapshot = null;
+    if (result.state === 'supported' && !nativeGameMatchesSnapshot(nativeSelectedGame, result)) {
+      nativeSelectedGame = nativeDefaultGame(result.gameVersion, result.game);
+    }
+    renderNativeGameControls(); $('native-summary').hidden = true;
+    $('native-empty').hidden = true; $('native-panel').hidden = false;
+    $('native-panel').replaceChildren(nativeNode('p', 'native-muted', 'Carregando o save importado…'));
+    label.textContent = result.state === 'supported'
+      ? `${result.game} reconhecido · ${result.summary?.caught ?? result.caught ?? 0} capturados · original preservado.`
       : `Cópia preservada como não suportada: ${result.reason || 'formato não reconhecido'}`;
     imported = true;
   } catch (error) { label.textContent = error.message; }
   finally {
-    nativeBusy = false; button.disabled = false;
+    nativeBusy = false; button.disabled = false; $('native-snapshot-select').disabled = false;
     if (imported) await refreshNative();
+    else $('native-delete').disabled = !nativeHash;
+  }
+}
+function askRemoveNativeSave() {
+  if (nativeBusy) return;
+  const row = nativeRows.find(item => item.sha256 === $('native-snapshot-select').value);
+  if (!row) return;
+  nativeDeleteHash = row.sha256;
+  $('native-delete-description').textContent = `A cópia “${row.filename}” e os dados derivados deste save serão removidos do Chest Link. O arquivo original no PC não será alterado.`;
+  $('native-delete-dialog').showModal();
+}
+async function removeNativeSave() {
+  const digest = nativeDeleteHash;
+  $('native-delete-dialog').close(); nativeDeleteHash = '';
+  if (!digest || nativeBusy) return;
+  const row = nativeRows.find(item => item.sha256 === digest);
+  nativeBusy = true; $('native-delete').disabled = true; $('native-import').disabled = true;
+  $('native-snapshot-select').disabled = true;
+  $('native-import-status').textContent = `Removendo ${row?.filename || 'save'}…`;
+  try {
+    await api('/api/native-saves/delete', {sha256: digest});
+    nativeHash = ''; nativeSnapshot = null; nativeCompletionHash = ''; nativeCompletion = null;
+    $('native-import-status').textContent = `${row?.filename || 'Save'} removido do Chest Link; o original foi mantido.`;
+  } catch (error) {
+    $('native-import-status').textContent = error.message;
+  } finally {
+    nativeBusy = false; $('native-delete').disabled = false; $('native-import').disabled = false;
+    $('native-snapshot-select').disabled = false;
+    await refreshNative();
   }
 }
 async function refresh(manual = false) {
@@ -1287,18 +1878,37 @@ $('confirm-hotspot').onclick = () => changeHotspot('start');
 document.querySelectorAll('[data-pool]').forEach(button => button.onclick = () => { dexPool = button.dataset.pool; renderDex(); });
 document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => changeDexMode(button.dataset.mode));
 $('dex-generation').onchange = () => {
-  if ($('dex-generation').value === 'home') { dexGame = 'home'; dexPool = 'all'; }
-  else { dexGame = 'red'; dexPool = 'available'; }
-  renderGamePicker(); renderDex();
+  const value = $('dex-generation').value;
+  if (value === 'home') { dexGame = 'home'; dexPool = 'all'; renderGamePicker(); renderDex(); return; }
+  const generation = Number(value);
+  dexGame = generation === 1 ? 'red' : generation === 2 ? 'gold' : generation === 3 ? 'firered' : 'diamond'; dexPool = 'available';
+  if (dexData?.generation === generation) { renderGamePicker(); renderDex(); }
+  else loadDexData(generation);
 };
 $('dex-search').oninput = renderDex; $('dex-type').onchange = () => { dexType = $('dex-type').value; renderDex(); }; $('dex-exclusive').onchange = renderDex;
 $('dex-retry').onclick = () => dexData ? refreshDex() : loadDexData();
 $('nav-boxes').onclick = () => setMainView('boxes'); $('nav-dex').onclick = () => setMainView('dex'); $('nav-native').onclick = () => setMainView('native');
 $('native-import').onclick = importNativeSave;
-$('native-snapshot-select').onchange = () => { nativeHash = $('native-snapshot-select').value; nativeEpoch++; refreshNative(); };
+$('native-snapshot-select').onchange = () => {
+  nativeHash = $('native-snapshot-select').value;
+  nativeSnapshot = null;
+  $('native-summary').hidden = true;
+  if (!nativeHash) { showNativeNoCompatibleSave(); return; }
+  $('native-empty').hidden = true; $('native-panel').hidden = false;
+  $('native-panel').replaceChildren(nativeNode('p', 'native-muted', 'Carregando o save selecionado…'));
+  nativeEpoch++; refreshNative();
+};
+$('native-generation-select').onchange = () => {
+  const nextGame = nativeGameChoices[$('native-generation-select').value]?.[0]?.id || null;
+  selectNativeGame(nextGame);
+};
+ $('native-game-select').onchange = () => selectNativeGame($('native-game-select').value);
+$('native-delete').onclick = askRemoveNativeSave;
+$('cancel-native-delete').onclick = () => { nativeDeleteHash = ''; $('native-delete-dialog').close(); };
+$('confirm-native-delete').onclick = removeNativeSave;
 document.querySelectorAll('[data-native-tab]').forEach(button => button.onclick = async () => { nativeTab = button.dataset.nativeTab; await renderNativePanel(); });
 document.querySelectorAll('[data-filter]').forEach(button => button.onclick = () => { filter = Number(button.dataset.filter); document.querySelectorAll('[data-filter]').forEach(item => item.setAttribute('aria-pressed', String(item === button))); renderBanks(); });
 $('clear').onclick = () => { masks.fill(0); renderBox(); }; $('to-ds').onclick = () => askSend(1); $('to-3ds').onclick = () => askSend(2); $('cancel-send').onclick = () => $('confirm').close(); $('confirm-send').onclick = send; $('credits').onclick = () => $('credits-dialog').showModal(); $('close-credits').onclick = () => $('credits-dialog').close();
 $('sort-box').onclick = () => organize('sort'); $('compact-box').onclick = () => organize('compact'); $('living-dex').onclick = () => organize('living-dex');
-renderBox(); refresh(); loadDexData(); setInterval(() => { if (!busy && currentView !== 'native') refresh(); }, 5000);
+renderNativeGameControls(); renderBox(); setMainView(currentView); refresh(); loadDexData(); setInterval(() => { if (!busy && currentView !== 'native') refresh(); }, 5000);
 })();

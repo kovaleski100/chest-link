@@ -106,19 +106,20 @@ int Wifi_ProcessReceivedFrame(int macbase, int framelen)
             // We like data!
             return WFLAG_PACKET_DATA;
 
+        case TYPE_QOS_DATA: // 1000 10 QoS Data
+        case TYPE_QOS_DATA_CF_ACK: // 1001 10 QoS Data + CF-Ack
+        case TYPE_QOS_DATA_CF_POLL: // 1010 10 QoS Data + CF-Poll
+        case TYPE_QOS_DATA_CF_ACK_CF_POLL: // 1011 10 QoS Data + CF-Ack + CF-Poll
+            return WFLAG_PACKET_DATA;
+
         case TYPE_NULL_FUNCTION: // 0100 10 Null Function
         case TYPE_CF_ACK: // 0101 10 CF-Ack
         case TYPE_CF_POLL: // 0110 10 CF-Poll
         case TYPE_CF_ACK_CF_POLL: // 0111 10 CF-Ack + CF-Poll
             return WFLAG_PACKET_DATA;
 
-        // QoS frames are ignored. When we send the capability information of
-        // the DS the QoS bit isn't set.
+        // QoS frames without an MSDU payload remain unsupported.
 
-        //case TYPE_QOS_DATA:
-        //case TYPE_QOS_DATA_CF_ACK:
-        //case TYPE_QOS_DATA_CF_POLL:
-        //case TYPE_QOS_DATA_CF_ACK_CF_POLL:
         //case TYPE_QOS_NULL:
         //case TYPE_QOS_CF_POLL:
         //case TYPE_QOS_CF_POLL_CF_ACK:

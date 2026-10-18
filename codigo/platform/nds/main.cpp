@@ -21,6 +21,7 @@ extern "C" {
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace platform {
@@ -31,16 +32,20 @@ static Touch lastTouch;
 static std::string launchPath, appDirectory;
 static bool nativeKeyboard = false;
 static chestlink::NetworkStatus networkState;
-static chestlink::InternetProbeSchedule internetSchedule;
-static int internetSocket = -1;
+static chestlink::ServerProbeSchedule serverSchedule;
+static int serverSocket = -1;
+static uint64_t nextServerProbeSend = 0;
+static uint32_t serverProbeNonce = 0;
+static uint32_t serverProbeSequence = 0;
 
 namespace {
 constexpr unsigned MAX_CLEANUP_DEPTH = 16;
 constexpr unsigned MAX_CLEANUP_DIRECTORIES = 4096;
+constexpr uint16_t SERVER_DISCOVERY_PORT = 40992;
 
-void closeInternetProbe() {
-  if (internetSocket >= 0) closesocket(internetSocket);
-  internetSocket = -1;
+void closeServerProbe() {
+  if (serverSocket >= 0) closesocket(serverSocket);
+  serverSocket = -1;
 }
 
 std::string ipv4Text(uint32_t value) {
@@ -50,46 +55,63 @@ std::string ipv4Text(uint32_t value) {
   return inet_ntop(AF_INET, &addr, text, sizeof(text)) ? text : "0.0.0.0";
 }
 
-void pollInternetProbe(uint64_t now) {
-  if (internetSchedule.due(now)) {
-    internetSchedule.begin(now);
-    internetSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    int nonblocking = 1;
-    if (internetSocket < 0 || ioctl(internetSocket, FIONBIO, &nonblocking) < 0) {
-      closeInternetProbe(); internetSchedule.finish(false, now); return;
+void sendServerDiscovery(uint64_t now) {
+  if (serverSocket < 0 || now < nextServerProbeSend) return;
+  uint8_t request[12] = {'C', 'L', 'D', 'S', 'D', 'I', 'S', 'C'};
+  request[8] = static_cast<uint8_t>(serverProbeNonce >> 24);
+  request[9] = static_cast<uint8_t>(serverProbeNonce >> 16);
+  request[10] = static_cast<uint8_t>(serverProbeNonce >> 8);
+  request[11] = static_cast<uint8_t>(serverProbeNonce);
+  sockaddr_in target{};
+  target.sin_len = sizeof(target);
+  target.sin_family = AF_INET;
+  target.sin_port = htons(SERVER_DISCOVERY_PORT);
+  target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+  (void)sendto(serverSocket, request, sizeof(request), 0,
+               reinterpret_cast<const sockaddr *>(&target), sizeof(target));
+  nextServerProbeSend = now + 350;
+}
+
+void pollServerProbe(uint64_t now) {
+  if (serverSchedule.due(now)) {
+    serverSchedule.begin(now);
+    serverProbeNonce = (static_cast<uint32_t>(now) ^ 0xc1a0d5e3u) +
+                       (++serverProbeSequence * 0x9e3779b9u);
+    serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int broadcast = 1, nonblocking = 1;
+    if (serverSocket < 0 ||
+        setsockopt(serverSocket, SOL_SOCKET, SO_BROADCAST, &broadcast,
+                   sizeof(broadcast)) < 0 ||
+        ioctl(serverSocket, FIONBIO, &nonblocking) < 0) {
+      closeServerProbe(); serverSchedule.finish({}, now); return;
     }
-    // Read-only reachability check to Cloudflare's public HTTPS resolver.
-    // No DNS lookup, TLS request, credentials or Pokemon data are sent.
-    sockaddr_in peer{};
-    peer.sin_len = sizeof(peer);
-    peer.sin_family = AF_INET;
-    peer.sin_port = htons(443);
-    peer.sin_addr.s_addr = inet_addr("1.1.1.1");
-    const int result = ::connect(internetSocket,
-        reinterpret_cast<sockaddr *>(&peer), sizeof(peer));
-    if (!result) {
-      closeInternetProbe(); internetSchedule.finish(true, now); return;
-    }
-    if (errno != EINPROGRESS && errno != EWOULDBLOCK && errno != EAGAIN) {
-      closeInternetProbe(); internetSchedule.finish(false, now); return;
-    }
+    nextServerProbeSend = 0;
   }
-  if (!internetSchedule.pending() || internetSocket < 0) return;
-  if (internetSchedule.expired(now)) {
-    closeInternetProbe(); internetSchedule.finish(false, now); return;
+  if (!serverSchedule.pending() || serverSocket < 0) return;
+  if (serverSchedule.expired(now)) {
+    closeServerProbe(); serverSchedule.finish({}, now); return;
   }
-  fd_set writable, errors;
-  FD_ZERO(&writable); FD_ZERO(&errors);
-  FD_SET(internetSocket, &writable); FD_SET(internetSocket, &errors);
-  timeval immediate{0, 0};
-  const int result = select(internetSocket + 1, nullptr, &writable, &errors, &immediate);
-  if (result < 0 && errno == EINTR) return;
-  if (!result) return;
-  int error = 0;
-  socklen_t length = sizeof(error);
-  const bool success = result > 0 &&
-      !getsockopt(internetSocket, SOL_SOCKET, SO_ERROR, &error, &length) && !error;
-  closeInternetProbe(); internetSchedule.finish(success, now);
+  sendServerDiscovery(now);
+  uint8_t response[12]{};
+  sockaddr_in source{};
+  socklen_t sourceLength = sizeof(source);
+  const ssize_t received = recvfrom(serverSocket, response, sizeof(response), 0,
+      reinterpret_cast<sockaddr *>(&source), &sourceLength);
+  if (received < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return;
+    closeServerProbe(); serverSchedule.finish({}, now); return;
+  }
+  if (received != sizeof(response) || std::memcmp(response, "CLPCDISC", 8) ||
+      ntohs(source.sin_port) != SERVER_DISCOVERY_PORT || !source.sin_addr.s_addr)
+    return;
+  // Compare the nonce byte-by-byte because its wire format is network order.
+  if (response[8] != static_cast<uint8_t>(serverProbeNonce >> 24) ||
+      response[9] != static_cast<uint8_t>(serverProbeNonce >> 16) ||
+      response[10] != static_cast<uint8_t>(serverProbeNonce >> 8) ||
+      response[11] != static_cast<uint8_t>(serverProbeNonce))
+    return;
+  const std::string address = ipv4Text(source.sin_addr.s_addr);
+  closeServerProbe(); serverSchedule.finish(address, now);
 }
 
 void refreshNetworkStatus(bool force = false) {
@@ -113,11 +135,12 @@ void refreshNetworkStatus(bool force = false) {
       networkState.ipv4Ready = networkState.connected && Wifi_IsIPReady();
       if (networkState.ipv4Ready) networkState.ip = ipv4Text(Wifi_GetIP());
     }
-    if (internetSchedule.link(networkState.ssid, networkState.ip, networkState.ipv4Ready))
-      closeInternetProbe();
+    if (serverSchedule.link(networkState.ssid, networkState.ip, networkState.ipv4Ready))
+      closeServerProbe();
   }
-  pollInternetProbe(now);
-  networkState.internet = internetSchedule.result();
+  pollServerProbe(now);
+  networkState.server = serverSchedule.result();
+  networkState.serverIP = serverSchedule.serverIP();
   gui::setNetworkStatus(networkState);
 }
 
@@ -201,27 +224,100 @@ std::string wifiPreferencePath() {
   throw chestlink::Error("Cartao SD/flashcard nao encontrado.");
 }
 
-std::string preferredSsid() {
+std::string wifiNetworkPath() {
+  std::string path = wifiPreferencePath();
+  path.replace(path.size() - std::strlen("wifi-ssid.txt"),
+               std::strlen("wifi-ssid.txt"), "wifi-network.dat");
+  return path;
+}
+
+struct WifiPreference {
+  std::string ssid;
+  std::string password;
+};
+
+constexpr char WIFI_PREFERENCE_MAGIC[] = "CLWIFI1";
+
+bool validWifiPreference(const WifiPreference &preference) {
+  if (preference.ssid.empty() || preference.ssid.size() > 32 ||
+      preference.ssid.find('\0') != std::string::npos ||
+      preference.password.size() > 63 ||
+      (!preference.password.empty() && preference.password.size() < 8) ||
+      preference.password.find('\0') != std::string::npos)
+    return false;
+  return std::all_of(preference.password.begin(), preference.password.end(),
+                     [](unsigned char c) { return c >= 32 && c <= 126; });
+}
+
+std::string serializeWifiPreference(const WifiPreference &preference) {
+  std::string serialized(WIFI_PREFERENCE_MAGIC,
+                         sizeof(WIFI_PREFERENCE_MAGIC) - 1);
+  serialized.push_back(static_cast<char>(preference.ssid.size()));
+  serialized.push_back(static_cast<char>(preference.password.size()));
+  serialized.append(preference.ssid);
+  serialized.append(preference.password);
+  return serialized;
+}
+
+bool parseWifiPreference(const std::string &serialized,
+                         WifiPreference &preference) {
+  constexpr size_t headerSize = sizeof(WIFI_PREFERENCE_MAGIC) - 1;
+  if (serialized.size() < headerSize + 2 ||
+      serialized.compare(0, headerSize, WIFI_PREFERENCE_MAGIC,
+                         headerSize) != 0)
+    return false;
+  const size_t ssidLength =
+      static_cast<unsigned char>(serialized[headerSize]);
+  const size_t passwordLength =
+      static_cast<unsigned char>(serialized[headerSize + 1]);
+  if (serialized.size() != headerSize + 2 + ssidLength + passwordLength)
+    return false;
+  WifiPreference parsed;
+  parsed.ssid.assign(serialized, headerSize + 2, ssidLength);
+  parsed.password.assign(serialized, headerSize + 2 + ssidLength,
+                         passwordLength);
+  if (!validWifiPreference(parsed))
+    return false;
+  preference = std::move(parsed);
+  return true;
+}
+
+WifiPreference preferredNetwork() {
   try {
-    const std::string path = wifiPreferencePath();
-    const std::string backup = path + ".previous";
-    const std::string selected = chestlink::exists(path)
-                                     ? path
-                                     : (chestlink::exists(backup) ? backup : "");
-    if (selected.empty())
-      return {};
-    const std::string ssid = chestlink::readText(selected, 32);
-    return ssid.size() <= 32 && ssid.find('\0') == std::string::npos ? ssid
-                                                                     : "";
+    const std::string legacyPath = wifiPreferencePath();
+    const std::string networkPath = wifiNetworkPath();
+    for (const std::string &path : {networkPath, networkPath + ".previous"}) {
+      if (!chestlink::exists(path))
+        continue;
+      try {
+        WifiPreference preference;
+        if (parseWifiPreference(chestlink::readText(path, 104), preference))
+          return preference;
+      } catch (const chestlink::Error &) {
+        // Try the backup or legacy SSID-only preference below.
+      }
+    }
+    for (const std::string &path : {legacyPath, legacyPath + ".previous"}) {
+      if (!chestlink::exists(path))
+        continue;
+      try {
+        WifiPreference preference{chestlink::readText(path, 32), {}};
+        if (validWifiPreference(preference))
+          return preference;
+      } catch (const chestlink::Error &) {
+        // A damaged preference should not prevent manual Wi-Fi setup.
+      }
+    }
   } catch (const chestlink::Error &) {
-    return {};
+    // Storage may not be available yet; allow the user to configure it later.
   }
+  return {};
 }
 
 bool askWpa2Password(std::string &result,
                      const char *promptTitle = "Rede WPA2") {
   gui::notice(promptTitle, "Digite a senha no teclado da tela inferior.",
-              "A senha nao sera salva no cartao SD.", 0);
+              "A senha sera salva no cartao apos conectar.", 0);
   nativeKeyboard = true;
   videoSetModeSub(MODE_0_2D | DISPLAY_BG0_ACTIVE | DISPLAY_BG3_ACTIVE);
   consoleDemoInit();
@@ -299,8 +395,12 @@ bool askWpa2Password(std::string &result,
   return true;
 }
 
-void savePreferredSsid(const std::string &ssid) {
-  const std::string path = wifiPreferencePath();
+void savePreferredNetwork(const std::string &ssid,
+                          const std::string &password) {
+  const WifiPreference preference{ssid, password};
+  if (!validWifiPreference(preference))
+    throw chestlink::Error("A configuracao da rede Wi-Fi e invalida.");
+  const std::string path = wifiNetworkPath();
   chestlink::makeDirs(path.substr(0, path.find_last_of('/')));
   const std::string temporary = path + ".new";
   const std::string backup = path + ".previous";
@@ -317,7 +417,7 @@ void savePreferredSsid(const std::string &ssid) {
   }
 
   try {
-    chestlink::writeText(temporary, ssid);
+    chestlink::writeText(temporary, serializeWifiPreference(preference));
   } catch (...) {
     std::remove(temporary.c_str());
     throw;
@@ -595,14 +695,18 @@ bool reconnectSavedNetwork(const std::string &ssid, std::string &failure) {
                                  ? "Busca da rede anterior cancelada."
                                  : "A rede salva nao foi encontrada na busca.");
 
-    std::string password;
+    const bool wpa2 = accessPoints.front().security_type == AP_SECURITY_WPA2;
+    const WifiPreference saved = preferredNetwork();
+    std::string password = wpa2 && saved.ssid == ssid ? saved.password : "";
     try {
-      if (accessPoints.front().security_type == AP_SECURITY_WPA2 &&
+      if (wpa2 && password.empty() &&
           !askWpa2Password(password, "Senha da rede anterior"))
         throw chestlink::Error("Entrada da senha da rede salva cancelada.");
       const bool connected = connectAccessPoint(
           accessPoints.front(), true, password, 20000,
           "Restaurando rede anterior");
+      if (connected)
+        savePreferredNetwork(ssid, wpa2 ? password : "");
       std::fill(password.begin(), password.end(), '\0');
       if (!connected)
         throw chestlink::Error("Restauracao da rede anterior cancelada.");
@@ -704,7 +808,7 @@ unsigned removePreviousApplicationVersions(uint32_t currentVersion,
   return state.removed;
 }
 void shutdown() {
-  closeInternetProbe();
+  closeServerProbe();
   if (wifi)
     Wifi_Deinit();
 }
@@ -791,6 +895,11 @@ std::vector<chestlink::Store> stores() {
   }
   return out;
 }
+std::vector<std::string> gameSaveSearchRoots() {
+  return {"sd:/_nds/TWiLightMenu/saves", "fat:/_nds/TWiLightMenu/saves",
+          "sd:/roms", "fat:/roms", "sd:/saves", "fat:/saves",
+          "sd:/pokemon", "fat:/pokemon", "sd:/", "fat:/"};
+}
 void network() {
   if (wifi && Wifi_AssocStatus() == ASSOCSTATUS_ASSOCIATED && Wifi_IsIPReady()) {
     const uint32_t currentIP = Wifi_GetIP();
@@ -799,7 +908,8 @@ void network() {
       return;
     }
   }
-  const std::string ssid = preferredSsid();
+  const WifiPreference preference = preferredNetwork();
+  const std::string &ssid = preference.ssid;
   if (ssid.empty())
     throw chestlink::Error("Escolhe Configurar Wi-Fi no menu para conectar.");
   initializeWifi();
@@ -807,13 +917,19 @@ void network() {
   if (accessPoints.empty())
     throw chestlink::Error(
         "Rede salva indisponivel. Usa Configurar Wi-Fi para trocar.");
-  std::string password;
+  std::string password = preference.password;
+  const bool needsPasswordSave =
+      accessPoints.front().security_type == AP_SECURITY_WPA2 &&
+      password.empty();
   if (accessPoints.front().security_type == AP_SECURITY_WPA2 &&
+      password.empty() &&
       !askWpa2Password(password))
     throw chestlink::Error("Conexao com a rede salva cancelada.");
   bool connected = false;
   try {
     connected = connectAccessPoint(accessPoints.front(), false, password);
+    if (connected && needsPasswordSave)
+      savePreferredNetwork(ssid, password);
   } catch (...) {
     std::fill(password.begin(), password.end(), '\0');
     throw;
@@ -824,7 +940,7 @@ void network() {
 }
 std::string configureNetwork() {
   initializeWifi();
-  const std::string previousSsid = preferredSsid();
+  const std::string previousSsid = preferredNetwork().ssid;
   std::string selectedSsid;
   std::string failure;
   bool cancelled = false;
@@ -848,14 +964,18 @@ std::string configureNetwork() {
 
       Wifi_AccessPoint accessPoint = accessPoints[selected];
       const std::string candidateSsid = accessPoint.ssid;
-      std::string password;
-      if (accessPoint.security_type == AP_SECURITY_WPA2 &&
-          !askWpa2Password(password))
+      const bool wpa2 = accessPoint.security_type == AP_SECURITY_WPA2;
+      const WifiPreference saved = preferredNetwork();
+      std::string password =
+          wpa2 && saved.ssid == candidateSsid ? saved.password : "";
+      if (wpa2 && password.empty() && !askWpa2Password(password))
         continue;
 
       bool connected = false;
       try {
         connected = connectAccessPoint(accessPoint, true, password, 25000);
+        if (connected)
+          savePreferredNetwork(candidateSsid, wpa2 ? password : "");
       } catch (...) {
         std::fill(password.begin(), password.end(), '\0');
         throw;
@@ -867,7 +987,6 @@ std::string configureNetwork() {
       // Association plus a usable IP (DHCP for ordinary APs, the configured
       // static address for ChestLink-DS) is the commit point. Until it
       // succeeds, the old preference remains untouched.
-      savePreferredSsid(candidateSsid);
       selectedSsid = candidateSsid;
     }
   } catch (const std::exception &e) {
@@ -905,6 +1024,58 @@ std::string configureNetwork() {
 }
 std::string ip() {
   return Wifi_IsIPReady() ? ipv4Text(Wifi_GetIP()) : "0.0.0.0";
+}
+std::string updateNetworkDiagnostics() {
+  if (!wifi)
+    return "wifi=off";
+  Wifi_AccessPoint actual{};
+  const bool haveAP = Wifi_GetCurrentAP(&actual) != 0;
+  const char *security = "unknown";
+  if (haveAP) {
+    switch (actual.security_type) {
+    case AP_SECURITY_OPEN: security = "open"; break;
+    case AP_SECURITY_WEP: security = "WEP"; break;
+    case AP_SECURITY_WPA: security = "WPA"; break;
+    case AP_SECURITY_WPA2: security = "WPA2"; break;
+    }
+  }
+  std::string result = std::string("driver=") +
+      (isDSiMode() ? "DSi-native" : "NTR") + " security=" + security;
+  if (haveAP && actual.security_type == AP_SECURITY_WPA2 && !isDSiMode()) {
+    result += " ccmp_rx=" + std::to_string(Wifi_GetStats(WSTAT_NTR_CCMP_RX));
+    result += " ccmp_valid=" + std::to_string(Wifi_GetStats(WSTAT_NTR_CCMP_VALID));
+    result += " mic_failed=" + std::to_string(Wifi_GetStats(WSTAT_NTR_CCMP_MIC_FAILED));
+    result += " rx_ram=" + std::to_string(Wifi_GetStats(WSTAT_NTR_RX_RAM_CANDIDATES));
+    result += " rx_radio_rejected=" + std::to_string(Wifi_GetStats(WSTAT_NTR_RX_RADIO_REJECTED));
+    result += " rx_fcs_boundary=" + std::to_string(Wifi_GetStats(WSTAT_NTR_RX_FCS_BOUNDARY));
+    result += " rx_reported=" + std::to_string(Wifi_GetStats(WSTAT_NTR_RX_REPORTED_SIZE));
+    result += " rx_frame=" + std::to_string(Wifi_GetStats(WSTAT_NTR_RX_FRAME_SIZE));
+    // Ordered stages: ARM7 enqueue / ARM9 consume / queue loss / backpressure;
+    // lwIP input / drop; authenticated TCP seq+length/port; checked TCP seq /
+    // expected seq; ACK queued / handed to the radio, each with its ACK number.
+    auto stat = [](int index) { return std::to_string(Wifi_GetStats(index)); };
+    result += " rxq=" + stat(WSTAT_RXQUEUEDPACKETS) + "/" +
+              stat(WSTAT_NTR_RX_ARM9_PACKETS) + "/" + stat(WSTAT_RXQUEUEDLOST) +
+              "/" + stat(WSTAT_NTR_RX_BACKPRESSURE);
+    result += " lwip=" + stat(WSTAT_NTR_RX_LWIP_PACKETS) + "/" +
+              stat(WSTAT_NTR_RX_LWIP_DROPPED);
+    result += " tcp-rx=" + stat(WSTAT_NTR_TCP_RADIO_PACKETS) + ":" +
+              stat(WSTAT_NTR_TCP_RADIO_SEQ) + "+" + stat(WSTAT_NTR_TCP_RADIO_BYTES) +
+              "/" + stat(WSTAT_NTR_TCP_LOCAL_PORT);
+    result += " tcp-in=" + stat(WSTAT_NTR_TCP_INPUT_PACKETS) + ":" +
+              stat(WSTAT_NTR_TCP_INPUT_SEQ) + "/" + stat(WSTAT_NTR_TCP_INPUT_EXPECTED);
+    result += " ack=" + stat(WSTAT_NTR_TCP_ACK_QUEUED) + ":" +
+              stat(WSTAT_NTR_TCP_ACK_VALUE) + "/" + stat(WSTAT_NTR_TCP_ACK_ENCRYPTED) +
+              ":" + stat(WSTAT_NTR_TCP_ACK_RADIO_VALUE) +
+              " macfail=" + stat(WSTAT_NTR_ACK_TX_FAILURES) +
+              " retry=" + stat(WSTAT_NTR_ACK_TX_RETRIES) +
+              "/" + stat(WSTAT_NTR_ACK_TX_RETRY_LIMIT);
+    result += " txmac=" + stat(WSTAT_NTR_TX_COMPLETIONS) + ":" +
+              stat(WSTAT_NTR_TX_HEADER_STATUS) + "/" +
+              stat(WSTAT_NTR_TX_RAW_STATUS);
+    result += " txrej=" + stat(WSTAT_TXQUEUEDREJECTED);
+  }
+  return result;
 }
 const chestlink::NetworkStatus &networkStatus() { return networkState; }
 bool usingChestLinkHotspot() {

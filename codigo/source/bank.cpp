@@ -326,6 +326,49 @@ Package exportSelection(const Store &store, const Bank &bank,
     throw Error("Marque Pokemon ou uma box antes de enviar.");
   return exportSelectedOrdered(store, bank, masks, boxes, progress);
 }
+Package packageFromBoxes(
+    const Store &store,
+    const std::vector<std::array<uint8_t, BOX_BYTES>> &boxes,
+    const std::vector<std::string> &names) {
+  if (boxes.empty() || boxes.size() != names.size() ||
+      boxes.size() > store.maxBoxes || boxes.size() > MAX_BOXES)
+    throw Error("Quantidade de boxes invalida para importar.");
+  makeDirs(store.work());
+  Package p;
+  p.bank = store.work() + "/out.bnk.part";
+  p.names = store.work() + "/out.json.part";
+  p.offer.boxes = static_cast<uint32_t>(boxes.size());
+  p.offer.bankBytes = 16 + p.offer.boxes * BOX_BYTES;
+  try {
+    File out(p.bank, "wb", p.offer.bankBytes);
+    uint8_t headerBytes[16];
+    std::memcpy(headerBytes, "PKSMBANK", 8);
+    put32(headerBytes + 8, 3);
+    put32(headerBytes + 12, p.offer.boxes);
+    out.write(headerBytes, sizeof(headerBytes));
+    Json jsonNames;
+    jsonNames.kind = Json::ARRAY;
+    for (unsigned box = 0; box < boxes.size(); ++box) {
+      out.write(boxes[box].data(), BOX_BYTES);
+      jsonNames.array.push_back(Json::text(names[box]));
+      for (unsigned slot = 0; slot < SLOTS; ++slot) {
+        const uint32_t generation = checkEntry(boxes[box].data() + slot * ENTRY);
+        if (generation) ++p.offer.occupied;
+        p.offer.generations |= generation;
+      }
+    }
+    out.close();
+    const std::string serializedNames = jsonNames.dump();
+    p.offer.namesBytes = static_cast<uint32_t>(serializedNames.size());
+    writeText(p.names, serializedNames);
+    p.offer.digest = digestFiles(p.bank, p.names);
+    validate(p, store);
+    return p;
+  } catch (...) {
+    discard(p);
+    throw;
+  }
+}
 static Package exportSelectedOrdered(const Store &store, const Bank &bank,
                                      const std::vector<uint32_t> &masks,
                                      const std::vector<unsigned> &selected,

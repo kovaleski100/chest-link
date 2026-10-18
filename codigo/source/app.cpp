@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "game_saves.hpp"
 #include "graphics.hpp"
 #include "mailbox.hpp"
 #include "network.hpp"
@@ -8,10 +9,122 @@
 #include "listener_schedule.hpp"
 #include "version.hpp"
 #include <algorithm>
+#include <exception>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 using namespace chestlink;
 namespace {
+class UpdateTrace {
+  std::string path_, session_, phase_ = "startup";
+  std::string peerIP_;
+  unsigned peerPort_ = 0;
+  int remoteSocket_ = -1;
+  FILE *file_ = nullptr;
+  uint64_t started_ = platform::milliseconds();
+  uint64_t lastWireActivityAt_ = started_;
+  uint32_t sent_ = 0, received_ = 0, nextWireCheckpoint_ = 64 * 1024;
+  uint32_t nextDownloadCheckpoint_ = 64 * 1024;
+  uint32_t remoteSent_ = 0, remoteFailed_ = 0;
+
+public:
+  explicit UpdateTrace(const std::string &directory) {
+    static uint32_t sequence = 0;
+    session_ = std::to_string(started_) + "-" + std::to_string(++sequence);
+    if (!directory.empty()) {
+      path_ = directory;
+      if (path_.back() != '/') path_ += '/';
+      path_ += "ChestLink_update_" + session_ + ".jsonl";
+      file_ = std::fopen(path_.c_str(), "ab");
+      if (!file_) path_.clear();
+    }
+    event("logger_started", {{"session", session_},
+                              {"app_version", appVersionText(APP_VERSION_CODE)}});
+  }
+
+  ~UpdateTrace() {
+    if (file_) std::fclose(file_);
+    closeUpdateTraceSocket(remoteSocket_);
+  }
+
+  const std::string &path() const { return path_; }
+
+  void enableRemote(const std::string &ip, unsigned port) {
+    peerIP_ = ip;
+    peerPort_ = port;
+    event("remote_logging_enabled", {{"server_ip", ip},
+                                      {"server_port", std::to_string(port)}});
+  }
+
+  void phase(const std::string &name) {
+    phase_ = name;
+    event("phase", {{"name", name}});
+  }
+
+  void event(const std::string &name,
+             std::initializer_list<std::pair<std::string, std::string>> fields = {}) noexcept {
+    if (!file_ && (peerIP_.empty() || !peerPort_)) return;
+    try {
+      Json entry;
+      entry.object["elapsed_ms"] = Json::integer(static_cast<uint32_t>(
+          platform::milliseconds() - started_));
+      entry.object["event"] = Json::text(name);
+      entry.object["phase"] = Json::text(phase_);
+      entry.object["session"] = Json::text(session_);
+      entry.object["tcp_sent_bytes"] = Json::integer(sent_);
+      entry.object["tcp_received_bytes"] = Json::integer(received_);
+      entry.object["local_log_open"] = Json::text(file_ ? "true" : "false");
+      entry.object["radio"] = Json::text(platform::updateNetworkDiagnostics());
+      entry.object["udp_logs_sent"] = Json::integer(remoteSent_);
+      entry.object["udp_logs_failed"] = Json::integer(remoteFailed_);
+      for (const auto &field : fields)
+        entry.object[field.first] = Json::text(field.second);
+      const std::string line = entry.dump() + "\n";
+      if (file_) {
+        const bool written =
+            std::fwrite(line.data(), 1, line.size(), file_) == line.size();
+        const bool flushed = std::fflush(file_) == 0;
+        const bool closed = std::fclose(file_) == 0;
+        file_ = nullptr;
+        if (written && flushed && closed) {
+          file_ = std::fopen(path_.c_str(), "ab");
+          if (!file_) path_.clear();
+        } else {
+          path_.clear();
+        }
+      }
+      if (!peerIP_.empty() && peerPort_) {
+        if (sendUpdateTrace(remoteSocket_, peerIP_, peerPort_, line)) ++remoteSent_;
+        else ++remoteFailed_;
+      }
+    } catch (...) {
+      // Diagnostics must never interrupt the update itself.
+    }
+  }
+
+  void wireActivity(bool writing, size_t bytes) noexcept {
+    if (bytes == 0) {
+      event("tcp_idle_checkpoint", {
+          {"idle_ms", std::to_string(platform::milliseconds() - lastWireActivityAt_)}});
+      return;
+    }
+    lastWireActivityAt_ = platform::milliseconds();
+    uint32_t &counter = writing ? sent_ : received_;
+    counter += static_cast<uint32_t>(bytes);
+    if (sent_ + received_ >= nextWireCheckpoint_) {
+      nextWireCheckpoint_ = sent_ + received_ + 64 * 1024;
+      event("tcp_checkpoint");
+    }
+  }
+
+  void downloadProgress(uint32_t done, uint32_t total) noexcept {
+    if (done < nextDownloadCheckpoint_ && done != total) return;
+    nextDownloadCheckpoint_ = done + 64 * 1024;
+    event("download_progress", {{"bytes_written", std::to_string(done)},
+                                 {"total_bytes", std::to_string(total)}});
+  }
+};
+
 enum class TransferAction { cancel, pc, direct };
 struct DirectListener {
   bool enabled = false;
@@ -243,7 +356,8 @@ unsigned numberTouch(unsigned k, unsigned &cursor, unsigned count, bool ip) {
     return t.x < 160 ? platform::A : platform::B;
   return 0;
 }
-std::string inputIP(const Store &store, bool pc = false) {
+std::string inputIP(const Store &store, bool pc = false, bool persist = true,
+                    const char *heading = nullptr) {
   unsigned octet[4] = {192, 168, 1, 100};
   std::string filename = pc ? "/server-ip.txt" : "/last-ip.txt";
   std::string path = settingsRoot(store) + filename;
@@ -267,7 +381,8 @@ std::string inputIP(const Store &store, bool pc = false) {
   }
   unsigned cursor = 0;
   for (;;) {
-    gui::numbers(pc ? "IP exibido no PC" : "IP do console que recebe",
+    gui::numbers(heading ? heading :
+                     (pc ? "Definir IP do PC" : "IP do console que recebe"),
                  {octet[0], octet[1], octet[2], octet[3]}, cursor, true);
     unsigned k = numberTouch(waitKey(), cursor, 4, true);
     if (k & platform::B)
@@ -288,8 +403,10 @@ std::string inputIP(const Store &store, bool pc = false) {
       char ip[32];
       std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u", octet[0], octet[1], octet[2],
                     octet[3]);
-      makeDirs(settingsRoot(store));
-      writeText(path, ip);
+      if (persist) {
+        makeDirs(settingsRoot(store));
+        writeText(path, ip);
+      }
       return ip;
     }
   }
@@ -340,11 +457,11 @@ uint32_t inputPIN(const Store *pcStore = nullptr) {
   }
 }
 Progress progress(const char *heading) {
-  auto previous = std::make_shared<int>(-1);
+  auto previous = std::make_shared<uint32_t>(UINT32_MAX);
   return [heading, previous](uint32_t done, uint32_t total) {
     int pct = total ? uint64_t(done) * 100 / total : 0;
-    if (pct != *previous) {
-      *previous = pct;
+    if (done != *previous) {
+      *previous = done;
       gui::notice(heading, std::to_string(done) + " / " + std::to_string(total),
                   done == total
                       ? "Verificando / aguardando confirmacao do destino..."
@@ -386,7 +503,7 @@ void consult() {
 }
 
 void transferSelection(Store &store, const Bank &bank,
-                        const std::string &bankName, SelectionResult result) {
+                       const std::string &bankName, SelectionResult result) {
   Package p = exportSelection(store, bank, result.masks,
                               progress("Preparando envio"));
   try {
@@ -435,6 +552,189 @@ void transferSelection(Store &store, const Bank &bank,
     throw;
   }
 }
+unsigned previewCount(const std::array<uint8_t, BOX_BYTES> &box,
+                      std::array<PokemonPreview, SLOTS> *previews = nullptr) {
+  unsigned count = 0;
+  for (unsigned slot = 0; slot < SLOTS; ++slot) {
+    PokemonPreview pokemon = previewPokemon(box.data() + slot * ENTRY);
+    if (previews) (*previews)[slot] = pokemon;
+    if (pokemon.occupied && pokemon.valid) ++count;
+  }
+  return count;
+}
+std::string gameBoxLabel(const GameSaveInfo &save, unsigned box) {
+  return save.title + " Box " + std::to_string(box + 1);
+}
+void importGameSaves() {
+  Store store = chooseStore();
+  title("Procurando saves...");
+  const auto found = discoverGameSaves();
+  std::vector<GameSaveInfo> saves;
+  for (const auto &save : found)
+    if (save.generation < 32 && (store.generations & (1u << save.generation)))
+      saves.push_back(save);
+  if (saves.empty()) {
+    message(found.empty()
+                ? "Nenhum .sav valido de Pokemon das Geracoes I a IV foi encontrado no SD/flashcard."
+                : "Os saves Pokemon encontrados nao sao compativeis com este armazenamento.\nGen I/II exigem o banco PKSM do 3DS.");
+    return;
+  }
+
+  GameSave loaded = readGameSave(saves.front());
+  std::array<uint8_t, BOX_BYTES> destination{};
+  destination.fill(0xFF);
+  std::string destinationName = "Pokemon importados";
+  std::string firstSource;
+  bool hasCopied = false;
+  gui::GameBoxesScreen screen;
+  std::map<std::string, unsigned> duplicateCounts, duplicateIndices;
+  for (const auto &save : saves) ++duplicateCounts[save.title];
+  for (const auto &save : saves) {
+    std::string label = save.title;
+    if (label == "HeartGold") label = "HG";
+    else if (label == "SoulSilver") label = "SS";
+    else if (label == "Diamond / Pearl") label = "D/P";
+    else if (label == "Ruby / Sapphire") label = "R/S";
+    else if (label == "FireRed / LeafGreen") label = "FR/LG";
+    else if (label == "Red / Blue / Yellow") label = "Gen I";
+    else if (label == "Red / Green / Blue / Yellow (JP)") label = "Gen I JP";
+    if (duplicateCounts[save.title] > 1)
+      label += std::to_string(++duplicateIndices[save.title]);
+    screen.games.push_back(safeDisplay(label, 8));
+  }
+  unsigned gameIndex = 0, boxIndex = 0;
+  auto updateScreen = [&]() {
+    screen.gameIndex = gameIndex;
+    screen.game = loaded.info.title;
+    screen.box = boxIndex;
+    screen.boxes = static_cast<unsigned>(loaded.boxes.size());
+    screen.boxName = loaded.boxes.at(boxIndex).name;
+    screen.targetCount = previewCount(destination, &screen.target);
+    screen.targetCursor = SLOTS;
+    for (unsigned slot = 0; slot < SLOTS; ++slot)
+      if (!screen.target[slot].occupied) {
+        screen.targetCursor = slot;
+        break;
+      }
+    if (screen.targetCursor == SLOTS) screen.targetCursor = SLOTS - 1;
+    for (unsigned slot = 0; slot < SLOTS; ++slot)
+      screen.source[slot] = previewPokemon(
+          loaded.boxes[boxIndex].entries.data() + slot * ENTRY);
+  };
+  updateScreen();
+
+  for (;;) {
+    gui::gameBoxes(screen);
+    unsigned k = waitKey();
+    int touchAction = -1;
+    if (k & platform::TOUCH) {
+      const auto t = platform::touch();
+      touchAction = gui::gameBoxesHit(screen, t.x, t.y);
+      if (touchAction >= 0 && touchAction < int(SLOTS)) {
+        screen.cursor = unsigned(touchAction);
+        k = platform::A;
+      } else if (touchAction >= 30 && touchAction <= 33) {
+        k = 0;
+      } else if (touchAction >= 40) {
+        gameIndex = unsigned(touchAction - 40);
+        loaded = readGameSave(saves.at(gameIndex));
+        boxIndex = 0;
+        screen.cursor = 0;
+        screen.status.clear();
+        updateScreen();
+        continue;
+      }
+    }
+    if (k & platform::B || touchAction == 33) return;
+    if (k & platform::LEFT) screen.cursor = (screen.cursor + 29) % 30;
+    if (k & platform::RIGHT) screen.cursor = (screen.cursor + 1) % 30;
+    if (k & platform::UP) screen.cursor = (screen.cursor + 24) % 30;
+    if (k & platform::DOWN) screen.cursor = (screen.cursor + 6) % 30;
+    if (k & platform::L) boxIndex = (boxIndex + loaded.boxes.size() - 1) % loaded.boxes.size();
+    if (k & platform::R) boxIndex = (boxIndex + 1) % loaded.boxes.size();
+    if (k & platform::X) {
+      gameIndex = (gameIndex + 1) % saves.size();
+      loaded = readGameSave(saves.at(gameIndex));
+      boxIndex = 0;
+      screen.cursor = 0;
+      screen.status.clear();
+    }
+
+    const int action = touchAction >= 30 && touchAction <= 33
+                           ? touchAction - 30
+                           : (k & platform::A) ? 0
+                           : (k & platform::Y) ? 1
+                           : (k & platform::START) ? 2 : -1;
+    if (action == 0) {
+      const unsigned sourceSlot = screen.cursor;
+      if (sourceSlot >= SLOTS || !screen.source[sourceSlot].occupied ||
+          !screen.source[sourceSlot].valid) {
+        screen.status = "Escolha um Pokemon valido";
+      } else {
+        unsigned targetSlot = SLOTS;
+        for (unsigned slot = 0; slot < SLOTS; ++slot)
+          if (!previewPokemon(destination.data() + slot * ENTRY).occupied) {
+            targetSlot = slot;
+            break;
+          }
+        if (targetSlot == SLOTS) {
+          screen.status = "A box de destino esta cheia";
+        } else {
+          std::memcpy(destination.data() + targetSlot * ENTRY,
+                      loaded.boxes[boxIndex].entries.data() + sourceSlot * ENTRY,
+                      ENTRY);
+          const std::string sourceName = gameBoxLabel(saves[gameIndex], boxIndex);
+          if (!hasCopied) {
+            firstSource = sourceName;
+            destinationName = sourceName;
+            hasCopied = true;
+          } else if (sourceName != firstSource) {
+            destinationName = "Pokemon de varios saves";
+          }
+          screen.status = "Pokemon copiado para o rascunho";
+        }
+      }
+    } else if (action == 1) {
+      const auto &source = loaded.boxes[boxIndex].entries;
+      const unsigned count = previewCount(source);
+      if (!count) {
+        screen.status = "Esta box nao tem Pokemon validos";
+      } else if (!screen.targetCount ||
+                 confirm("Copiar box inteira?",
+                         "A box selecionada substituira o rascunho atual.\n"
+                         "O save do jogo permanecera intacto.")) {
+        destination = source;
+        firstSource = gameBoxLabel(saves[gameIndex], boxIndex);
+        destinationName = firstSource;
+        hasCopied = true;
+        screen.status = "Box copiada para o rascunho";
+      }
+    } else if (action == 2) {
+      const unsigned count = previewCount(destination);
+      if (!count) {
+        screen.status = "Copie um Pokemon ou uma box primeiro";
+      } else {
+        if (confirm("Salvar no Chest Link?",
+                    std::to_string(count) + " Pokemon serao salvos como um banco novo.\n\n"
+                    "O save do jogo e os bancos atuais nao serao alterados.")) {
+          Package package = packageFromBoxes(store, {destination}, {destinationName});
+          try {
+            const std::string bank = importPackage(store, package);
+            discard(package);
+            message("Copia salva em " + store.label + ".\nBanco novo: " + bank +
+                    "\n\nAgora consulte esse banco para enviar ao PC.\n"
+                    "O .sav original permanece intacto.");
+          } catch (...) {
+            discard(package);
+            throw;
+          }
+          return;
+        }
+      }
+    }
+    updateScreen();
+  }
+}
 void receiveConnection(Connection &conn) {
   Store store = chooseStore();
   auto wire = conn.wire();
@@ -463,7 +763,8 @@ bool savedPCConnection(const Store &store, std::string &ip, uint32_t &pin) {
   if (!exists(ipPath) || !exists(pinPath))
     return false;
   try {
-    std::string ipText = readText(ipPath, 32), pinText = readText(pinPath, 6);
+    std::string ipText = readText(ipPath, 32);
+    std::string pinText = readText(pinPath, 6);
     unsigned a, b, c, d;
     char extra;
     if (std::sscanf(ipText.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d,
@@ -485,12 +786,15 @@ void updateApplication() {
   std::string ip;
   uint32_t pin = 0;
   std::string installPath;
+  bool discoveredAddress = false;
+  bool haveConnection = false;
+  std::string device;
+  std::string logDirectory = platform::runningApplicationDirectory();
 #ifdef CL_3DS
   auto stores = platform::stores();
   if (stores.empty())
     throw Error("Nenhum armazenamento disponivel para as configuracoes.");
   Store settings = stores.front();
-  bool haveConnection = false;
   for (const auto &store : stores) {
     if (savedPCConnection(store, ip, pin)) {
       settings = store;
@@ -498,13 +802,10 @@ void updateApplication() {
       break;
     }
   }
-  if (!haveConnection) {
-    // Reuses old per-store preferences as a fallback, but writes new settings
-    // to the dedicated SD config path. Updating never asks which bank to open.
-    ip = inputIP(settings, true);
-    pin = inputPIN(&settings);
-  }
+  // Reuses old per-store preferences as a fallback, but writes new settings
+  // to the dedicated SD config path. Updating never asks which bank to open.
   installPath = platform::runningApplicationPath();
+  if (logDirectory.empty()) logDirectory = settingsRoot(settings);
 #else
   auto stores = platform::stores();
   if (stores.empty())
@@ -520,78 +821,173 @@ void updateApplication() {
     selected = static_cast<unsigned>(choice);
   }
   Store settings = stores[selected];
-  std::string device = platform::runningApplicationDirectory();
+  device = logDirectory;
   if (device.empty()) {
     device = "/";
     auto mount = settings.root.find(":/");
     if (mount != std::string::npos)
       device = settings.root.substr(0, mount + 2);
   }
-  if (!savedPCConnection(settings, ip, pin)) {
-#ifdef CL_NDS
-    if (platform::usingChestLinkHotspot())
-      pin = inputPIN(&settings);
-    else {
+  logDirectory = device;
+  haveConnection = savedPCConnection(settings, ip, pin);
 #endif
-    ip = inputIP(settings, true);
-    pin = inputPIN(&settings);
+  UpdateTrace trace(logDirectory);
+  trace.event("update_started", {{"network", platform::updateNetworkDiagnostics()},
+                                  {"saved_server_ip", haveConnection ? ip : "none"}});
+  try {
+    platform::network();
+    trace.event("network_ready", {{"network", platform::updateNetworkDiagnostics()}});
+    bool usingHotspot = false;
 #ifdef CL_NDS
+    usingHotspot = platform::usingChestLinkHotspot();
+    if (usingHotspot) {
+      const std::string hotspotIP = platform::chestLinkHotspotServerIP();
+      if (hotspotIP.empty())
+        throw Error("Nao consegui ler o endereco do PC na rede ChestLink-DS.");
+      ip = hotspotIP;
     }
 #endif
-  }
-#endif
-  platform::network();
-#ifdef CL_NDS
-  if (platform::usingChestLinkHotspot()) {
-    const std::string hotspotIP = platform::chestLinkHotspotServerIP();
-    if (hotspotIP.empty())
-      throw Error("Nao consegui ler o endereco do PC na rede ChestLink-DS.");
-    ip = hotspotIP;
-  }
-#endif
-  title("Conectando ao servidor...");
-  auto connection = Connection::connect(ip, MAILBOX_PORT);
-  auto wire = connection.wire();
-  auto accept = [&installPath
+    std::unique_ptr<Connection> connection;
+    std::string connectionError;
+    auto tryConnect = [&](unsigned timeout) {
+      trace.event("tcp_connect_started", {{"server_ip", ip},
+                                           {"port", std::to_string(MAILBOX_PORT)},
+                                           {"timeout_ms", std::to_string(timeout)}});
+      try {
+        connection = std::make_unique<Connection>(
+            Connection::connect(ip, MAILBOX_PORT, timeout));
+        trace.event("tcp_connect_succeeded", {{"server_ip", ip}});
+        return true;
+      } catch (const Error &error) {
+        if (std::string(error.what()) == "Cancelado.")
+          throw;
+        connectionError = error.what();
+        trace.event("tcp_connect_failed", {{"server_ip", ip},
+                                            {"error", error.what()}});
+        return false;
+      }
+    };
+    if (!usingHotspot && haveConnection) {
+      // Keep the familiar fast path, but let a changed PC address fall through
+      // to discovery after a bounded attempt.
+      title("Conectando ao PC salvo...");
+      (void)tryConnect(1500);
+    }
+    if (!usingHotspot && !connection) {
+      title("Procurando o PC na rede...");
+      trace.phase("server_discovery");
+      const std::string discovered = discoverPCServer(MAILBOX_PORT);
+      trace.event("server_discovery_finished", {{"server_ip", discovered.empty() ? "not_found" : discovered}});
+      if (!discovered.empty()) {
+        ip = discovered;
+        discoveredAddress = true;
+        title("Conectando ao PC encontrado...");
+        (void)tryConnect(3000);
+      }
+    }
+    if (!usingHotspot && !connection) {
+      ip = inputIP(settings, true, false,
+                    discoveredAddress ? "PC sem resposta: informe IP"
+                                      : "PC nao encontrado: informe IP");
+      discoveredAddress = true;
+      title("Conectando ao IP informado...");
+      if (!tryConnect(3000))
+        throw Error("Servidor Chest Link nao encontrado no IP informado. "
+                    "Confira o IP e o Wi-Fi.");
+    }
+    if (usingHotspot && !connection) {
+      title("Conectando ao servidor...");
+      if (!tryConnect(3000))
+        throw Error(connectionError);
+    }
+    if (!haveConnection) {
+      trace.event("pin_prompt_started");
+      pin = inputPIN(&settings);
+      trace.event("pin_entered");
+    }
+    trace.phase("update_protocol");
+    auto wire = connection->wire(UPDATE_WIRE_IDLE_TIMEOUT_MS,
+                                 [&trace](bool writing, size_t bytes) {
+                                   trace.wireActivity(writing, bytes);
+                                 });
+    auto accept = [&installPath, &trace, &ip
 #ifndef CL_3DS
-                 , &device
+                   , &device
 #endif
-  ](uint32_t remote, uint32_t bytes, uint32_t local) {
+    ](uint32_t remote, uint32_t bytes, uint32_t local) {
+      trace.enableRemote(ip, MAILBOX_PORT);
+      trace.event("update_offer_received", {{"current_version", appVersionText(local)},
+                                            {"offered_version", appVersionText(remote)},
+                                            {"file_bytes", std::to_string(bytes)}});
 #ifndef CL_3DS
-    installPath = device;
-    if (!installPath.empty() && installPath.back() != '/')
-      installPath += '/';
-    installPath += "ChestLink_DS_v" + appVersionText(remote) + ".nds";
+      installPath = device;
+      if (!installPath.empty() && installPath.back() != '/')
+        installPath += '/';
+      installPath += "ChestLink_DS_v" + appVersionText(remote) + ".nds";
 #endif
-    std::string details = "Versao instalada: " + appVersionText(local) +
-                         "\nNova versao: " + appVersionText(remote) +
-                         "\nTamanho: " + std::to_string(bytes / 1024) +
-                         " KiB\n\nDestino: " + installPath +
-                         "\n\nBaixar e instalar agora?";
-    return confirm("Atualizacao disponivel", details);
-  };
+      std::string details = "Versao instalada: " + appVersionText(local) +
+                           "\nNova versao: " + appVersionText(remote) +
+                           "\nTamanho: " + std::to_string(bytes / 1024) +
+                           " KiB\n\nDestino: " + installPath +
+                           "\n\nBaixar e instalar agora?";
+      if (!confirm("Atualizacao disponivel", details)) {
+        trace.event("update_offer_declined");
+        return false;
+      }
+      trace.phase("download");
+      trace.event("update_offer_accepted", {{"destination", installPath}});
+      gui::notice("Baixando atualizacao",
+                  "Aguardando o PC iniciar o envio...", "Aguarde nesta tela.",
+                  0);
+      return true;
+    };
+    auto uiProgress = progress("Baixando atualizacao");
+    auto tracedProgress = [&trace, &uiProgress](uint32_t done, uint32_t total) {
+      trace.downloadProgress(done, total);
+      return uiProgress(done, total);
+    };
 #ifdef CL_3DS
-  UpdateResult update = update3DS(wire, pin, APP_VERSION_CODE, installPath,
-                                  accept, progress("Baixando atualizacao"));
+    UpdateResult update = update3DS(wire, pin, APP_VERSION_CODE, installPath,
+                                    accept, tracedProgress);
 #else
-  UpdateResult update = updateNDS(wire, pin, APP_VERSION_CODE, installPath,
-                                  accept, progress("Baixando atualizacao"));
+    UpdateResult update = updateNDS(wire, pin, APP_VERSION_CODE, installPath,
+                                    accept, tracedProgress);
 #endif
-  if (update.state == UpdateState::current) {
-    message("Chest Link ja esta atualizado.\nVersao no servidor: " +
-            appVersionText(update.version));
-  } else if (update.state == UpdateState::installed) {
+    trace.event("update_result", {{"state", update.state == UpdateState::installed ? "installed" :
+                                             update.state == UpdateState::cancelled ? "cancelled" : "current"},
+                                   {"version", appVersionText(update.version)},
+                                   {"file_bytes", std::to_string(update.bytes)}});
+    // Persist a new address only after the PIN-authenticated update exchange has
+    // completed, so a different Chest Link server on the LAN cannot replace it.
+    if (discoveredAddress) {
+      makeDirs(settingsRoot(settings));
+      writeText(settingsRoot(settings) + "/server-ip.txt", ip);
+    }
+    if (update.state == UpdateState::current) {
+      message("Chest Link ja esta atualizado.\nVersao no servidor: " +
+              appVersionText(update.version) +
+              (trace.path().empty() ? "" : "\n\nLog: " + trace.path()));
+    } else if (update.state == UpdateState::installed) {
 #ifdef CL_3DS
-    message("Atualizacao " + appVersionText(update.version) +
-            " instalada e conferida.\n\nSaia do Homebrew Launcher e abra "
-            "o Chest Link novamente.\nA versao anterior foi preservada ao "
-            "lado do app e sera removida depois que a nova versao iniciar.");
+      message("Atualizacao " + appVersionText(update.version) +
+              " instalada e conferida.\n\nSaia do Homebrew Launcher e abra "
+              "o Chest Link novamente.\nA versao anterior foi preservada ao "
+              "lado do app e sera removida depois que a nova versao iniciar." +
+              (trace.path().empty() ? "" : "\n\nLog: " + trace.path()));
 #else
-    message("Atualizacao " + appVersionText(update.version) +
-            " instalada e conferida.\n\nNova copia: " + installPath +
-            "\nAbra esse arquivo pelo menu da flashcard/SD. Ao iniciar a nova "
-            "versao, as copias antigas do Chest Link serao removidas.");
+      message("Atualizacao " + appVersionText(update.version) +
+              " instalada e conferida.\n\nNova copia: " + installPath +
+              "\nAbra esse arquivo pelo menu da flashcard/SD. Ao iniciar a nova "
+              "versao, as copias antigas do Chest Link serao removidas." +
+              (trace.path().empty() ? "" : "\n\nLog: " + trace.path()));
 #endif
+    }
+  } catch (const std::exception &error) {
+    trace.event("update_failed", {{"error", error.what()}});
+    const std::string logLine = trace.path().empty()
+                                    ? std::string()
+                                    : "\n\nLog: " + trace.path();
+    throw Error(std::string(error.what()) + logLine);
   }
 }
 
@@ -726,19 +1122,20 @@ int runApp() {
     while (platform::alive()) {
 #ifdef CL_3DS
       int n = choose("Chest Link",
-                     {"Atualizar pelo PC", "Consultar bancos", "Creditos", "Sair"}, true);
-      if (n < 0 || n == 3)
+                     {"Atualizar pelo PC", "Consultar bancos",
+                      "Ler saves Pokemon", "Creditos", "Sair"}, true);
+      if (n < 0 || n == 4)
         break;
 #elif defined(CL_NDS)
       int n = choose("Chest Link",
                      {"Configurar Wi-Fi", "Atualizar pelo PC", "Consultar bancos",
-                      "Creditos", "Sair"}, true);
-      if (n < 0 || n == 4)
+                      "Ler saves Pokemon", "Creditos", "Sair"}, true);
+      if (n < 0 || n == 5)
         break;
 #else
       int n = choose("Chest Link",
-                     {"Consultar bancos", "Creditos", "Sair"}, true);
-      if (n < 0 || n == 2)
+                     {"Consultar bancos", "Ler saves Pokemon", "Creditos", "Sair"}, true);
+      if (n < 0 || n == 3)
         break;
 #endif
       try {
@@ -747,6 +1144,8 @@ int runApp() {
           updateApplication();
         else if (n == 1)
           consult();
+        else if (n == 2)
+          importGameSaves();
         else
           message(
               "Versao " + appVersionText(APP_VERSION_CODE) +
@@ -774,6 +1173,8 @@ int runApp() {
           updateApplication();
         else if (n == 2)
           consult();
+        else if (n == 3)
+          importGameSaves();
         else
           message(
               "Versao " + appVersionText(APP_VERSION_CODE) +
@@ -785,6 +1186,8 @@ int runApp() {
 #else
         if (n == 0)
           consult();
+        else if (n == 1)
+          importGameSaves();
         else
           message(
               "Chest Link: app independente.\nVisual PKSM / "

@@ -50,6 +50,9 @@ static void Wifi_NTR_Update(void)
         }
         read_idx += sizeof(uint32_t);
 
+        if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+            WifiData->stats[WSTAT_NTR_RX_ARM9_PACKETS]++;
+
 #ifdef DSWIFI_ENABLE_LWIP
         if (wifi_lwip_enabled)
         {

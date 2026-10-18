@@ -183,19 +183,33 @@ def main():
     parser.add_argument('mode', choices=('preview', 'upload', 'update', 'fetch', 'direct_receive'))
     parser.add_argument('--ip')
     parser.add_argument('--save', default=os.environ.get('CHESTLINK_FIRERED_SAVE'))
+    parser.add_argument('--manual-update', action='store_true',
+                        help='Accept the DS update offer with the emulator-mapped A key.')
     args = parser.parse_args()
-    if not args.save: parser.error('Set CHESTLINK_FIRERED_SAVE or --save.')
+    if args.mode != 'update' and not args.save:
+        parser.error('Set CHESTLINK_FIRERED_SAVE or --save.')
+    if args.manual_update and (args.console != 'ds' or args.mode != 'update'):
+        parser.error('--manual-update is supported only for DS update probes.')
     args.ip = args.ip or ('10.64.0.1' if args.console == 'ds' else '127.0.0.1')
     artifacts = RunArtifacts(ROOT / 'build/e2e')
-    ctx = RunContext(artifacts, Environment.detect(), 90, build=False)
-    ctx.scenario_name = args.console + '_' + args.mode + '_firered'
+    ctx = RunContext(artifacts, Environment.detect(), 180 if args.manual_update else 90,
+                     build=False)
+    ctx.scenario_name = args.console + '_' + args.mode + ('_firered' if args.mode != 'update' else '')
     print('Private run: ' + str(artifacts.path), flush=True)
-    guard = PrivateSaveGuard(args.save)
+    guard = PrivateSaveGuard(args.save) if args.mode != 'update' else None
     status = 'FAIL'
     try:
-        fixture = create_firered_bank(args.save, artifacts.path / 'private/fixture')
-        print(f"FireRed: {fixture['boxed']} boxed, {fixture['party']} party, checksums OK", flush=True)
+        if args.mode == 'update':
+            fixture = {'store': artifacts.path / 'private/update-only-store',
+                       'bank_sha256': None, 'boxes': 0, 'occupied': 0}
+            fixture['store'].mkdir(parents=True, mode=0o700)
+            print('Update-only fixture: empty private storage; no save data is used.', flush=True)
+        else:
+            fixture = create_firered_bank(args.save, artifacts.path / 'private/fixture')
+            print(f"FireRed: {fixture['boxed']} boxed, {fixture['party']} party, checksums OK", flush=True)
         config = dict(ip=args.ip, pin=314159, port=40992)
+        if args.manual_update:
+            config['manual_update'] = 1
         if os.environ.get('CHESTLINK_PROBE_IDLE_MS'):
             config.update(ui_idle_ms=int(os.environ['CHESTLINK_PROBE_IDLE_MS']),
                           idle_listener=int(os.environ.get('CHESTLINK_PROBE_IDLE_LISTENER', '0')),
@@ -219,6 +233,12 @@ def main():
         probe = prepare(ctx, args.console, args.mode, fixture, config)
         direct_result = {}
         def on_stage(stage, _result):
+            if stage == 'update_offer' and args.manual_update:
+                from tests.e2e.ui_driver import NormalUIDriver
+                driver = NormalUIDriver('ds', probe['area'])
+                driver.wait(driver.dialog, 'update offer confirmation')
+                time.sleep(.5)
+                driver.key('x')
             if stage == 'listening' and args.mode == 'direct_receive':
                 direct_result.update(api(ctx, '/api/send-direct', dict(
                     id=item_id, target=target, masks=masks, ip='127.0.0.1', pin=314159)))
@@ -256,20 +276,25 @@ def main():
                              else 'platform/3ds/ChestLink_3DS.3dsx')
             if result.get('update_state') != 2 or result.get('installed_sha256') != hashlib.sha256(normal.read_bytes()).hexdigest():
                 raise AssertionError('Installed update does not match the verified normal executable.')
-            if result.get('bank_sha256') != fixture['bank_sha256']:
+            if result.get('downloaded_bytes') != result.get('download_total_bytes') or result.get('download_total_bytes') != result.get('update_bytes'):
+                raise AssertionError('Emulator progress did not report the full verified update stream.')
+            if fixture['bank_sha256'] and result.get('bank_sha256') != fixture['bank_sha256']:
                 raise AssertionError('Updater changed the private FireRed bank.')
-            print('Actual update installed in private emulator storage, executable SHA-256: PASS', flush=True)
+            print('Update streamed, verified and installed in private emulator storage; executable SHA-256: PASS', flush=True)
         artifacts.record(ctx.scenario_name, 'PASS', 'EMULATOR', metrics={
             'boxes': fixture['boxes'], 'pokemon': fixture['occupied'],
-            'private_fixture': 'FireRed', 'structured_result': True})
+            'private_fixture': 'FireRed' if fixture['bank_sha256'] else 'empty_update_storage',
+            'structured_result': True})
     except Exception as exc:
         status = 'FAIL'
         print(type(exc).__name__ + ': ' + str(exc), flush=True)
         artifacts.record(ctx.scenario_name, 'FAIL', 'EMULATOR', reason=str(exc))
     finally:
         ctx.processes.stop_all()
-        guard.verify_unchanged()
-        artifacts.write_summary(args.mode, {'real_hardware_tested': False, 'private_fixture': 'FireRed'})
+        if guard:
+            guard.verify_unchanged()
+        artifacts.write_summary(args.mode, {'real_hardware_tested': False,
+                                           'private_fixture': 'FireRed' if args.mode != 'update' else 'empty_update_storage'})
     print(status, ctx.scenario_name, flush=True)
     return 0 if status == 'PASS' else 1
 

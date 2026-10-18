@@ -2,6 +2,7 @@
 #include "core.hpp"
 
 namespace chestlink {
+constexpr unsigned UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS = 30000;
 enum class UpdateState { current, cancelled, installed };
 struct UpdateResult {
   UpdateState state = UpdateState::current;

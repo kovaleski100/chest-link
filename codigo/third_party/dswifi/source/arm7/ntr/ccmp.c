@@ -41,10 +41,10 @@ static int ccmp_mac_data(mbedtls_aes_context *aes, uint8_t state[16],
 }
 
 static int ccmp_compute_tag(mbedtls_aes_context *aes,
-                            const uint8_t nonce[13], const uint8_t aad[22],
-                            const uint8_t *plain, size_t length,
+                            const uint8_t nonce[13], const uint8_t *aad,
+                            size_t aad_length, const uint8_t *plain, size_t length,
                             uint8_t tag[8]) {
-  if (length > 0xffff)
+  if (length > 0xffff || !aad_length || aad_length > 0xfeff)
     return -1;
 
   uint8_t block[16] = {0};
@@ -59,20 +59,19 @@ static int ccmp_compute_tag(mbedtls_aes_context *aes,
   if (ccmp_aes_block(aes, block, state) != 0)
     return -1;
 
-  // CCM encodes a short AAD length as a two-byte big-endian prefix, then pads
-  // the prefix and the 22-byte 802.11 AAD to a full AES block.
+  // CCM encodes a short AAD length as a two-byte big-endian prefix. The first
+  // CBC-MAC block holds that prefix and 14 AAD bytes; following AAD bytes are
+  // processed in padded blocks.
   memset(block, 0, sizeof(block));
-  block[0] = 0;
-  block[1] = CCMP_AAD_SIZE;
-  memcpy(block + 2, aad, CCMP_AAD_SIZE > 14 ? 14 : CCMP_AAD_SIZE);
+  block[0] = (uint8_t)(aad_length >> 8);
+  block[1] = (uint8_t)aad_length;
+  const size_t first_aad = aad_length < 14 ? aad_length : 14;
+  memcpy(block + 2, aad, first_aad);
   if (ccmp_mac_block(aes, state, block) != 0)
     return -1;
-  if (CCMP_AAD_SIZE > 14) {
-    memset(block, 0, sizeof(block));
-    memcpy(block, aad + 14, CCMP_AAD_SIZE - 14);
-    if (ccmp_mac_block(aes, state, block) != 0)
-      return -1;
-  }
+  if (aad_length > first_aad &&
+      ccmp_mac_data(aes, state, aad + first_aad, aad_length - first_aad) != 0)
+    return -1;
 
   if (length && ccmp_mac_data(aes, state, plain, length) != 0)
     return -1;
@@ -114,24 +113,32 @@ static int ccmp_crypt(mbedtls_aes_context *aes, const uint8_t nonce[13],
   return 0;
 }
 
-bool Wifi_NTR_CcmpEncrypt(const uint8_t key[16], const uint8_t nonce[13],
-                          const uint8_t aad[22], const uint8_t *plain,
-                          size_t length, uint8_t *cipher, uint8_t mic[8]) {
-  if (!key || !nonce || !aad || (!plain && length) || (!cipher && length) ||
-      !mic || length > 0xffff)
+bool Wifi_NTR_CcmpEncryptAad(const uint8_t key[16], const uint8_t nonce[13],
+                             const uint8_t *aad, size_t aad_length,
+                             const uint8_t *plain, size_t length,
+                             uint8_t *cipher, uint8_t mic[8]) {
+  if (!key || !nonce || !aad || !aad_length || (!plain && length) ||
+      (!cipher && length) || !mic || length > 0xffff)
     return false;
 
   mbedtls_aes_context aes;
   mbedtls_aes_init(&aes);
   int result = mbedtls_aes_setkey_enc(&aes, key, 128);
   if (result == 0)
-    result = ccmp_compute_tag(&aes, nonce, aad, plain, length, mic);
+    result = ccmp_compute_tag(&aes, nonce, aad, aad_length, plain, length, mic);
   // Authenticate before encrypting so input and output are allowed to alias,
   // as they do in the NTR TX path where the ARM7 edits the frame in place.
   if (result == 0)
     result = ccmp_crypt(&aes, nonce, plain, length, cipher);
   mbedtls_aes_free(&aes);
   return result == 0;
+}
+
+bool Wifi_NTR_CcmpEncrypt(const uint8_t key[16], const uint8_t nonce[13],
+                          const uint8_t aad[22], const uint8_t *plain,
+                          size_t length, uint8_t *cipher, uint8_t mic[8]) {
+  return Wifi_NTR_CcmpEncryptAad(key, nonce, aad, CCMP_AAD_SIZE, plain,
+                                 length, cipher, mic);
 }
 
 bool Wifi_NTR_CcmpProbePayloadLength(const uint8_t key[16],
@@ -170,11 +177,12 @@ bool Wifi_NTR_CcmpProbePayloadLength(const uint8_t key[16],
   return true;
 }
 
-bool Wifi_NTR_CcmpDecrypt(const uint8_t key[16], const uint8_t nonce[13],
-                          const uint8_t aad[22], const uint8_t *cipher,
-                          size_t length, const uint8_t mic[8], uint8_t *plain) {
-  if (!key || !nonce || !aad || (!cipher && length) || (!plain && length) ||
-      !mic || length > 0xffff)
+bool Wifi_NTR_CcmpDecryptAad(const uint8_t key[16], const uint8_t nonce[13],
+                             const uint8_t *aad, size_t aad_length,
+                             const uint8_t *cipher, size_t length,
+                             const uint8_t mic[8], uint8_t *plain) {
+  if (!key || !nonce || !aad || !aad_length || (!cipher && length) ||
+      (!plain && length) || !mic || length > 0xffff)
     return false;
 
   mbedtls_aes_context aes;
@@ -185,7 +193,8 @@ bool Wifi_NTR_CcmpDecrypt(const uint8_t key[16], const uint8_t nonce[13],
   if (result == 0)
     result = ccmp_crypt(&aes, nonce, cipher, length, plain);
   if (result == 0)
-    result = ccmp_compute_tag(&aes, nonce, aad, plain, length, expected);
+    result = ccmp_compute_tag(&aes, nonce, aad, aad_length, plain, length,
+                              expected);
   if (result == 0) {
     for (size_t i = 0; i < CCMP_MIC_SIZE; ++i)
       difference |= expected[i] ^ mic[i];
@@ -198,4 +207,11 @@ bool Wifi_NTR_CcmpDecrypt(const uint8_t key[16], const uint8_t nonce[13],
     return false;
   }
   return true;
+}
+
+bool Wifi_NTR_CcmpDecrypt(const uint8_t key[16], const uint8_t nonce[13],
+                          const uint8_t aad[22], const uint8_t *cipher,
+                          size_t length, const uint8_t mic[8], uint8_t *plain) {
+  return Wifi_NTR_CcmpDecryptAad(key, nonce, aad, CCMP_AAD_SIZE, cipher,
+                                 length, mic, plain);
 }

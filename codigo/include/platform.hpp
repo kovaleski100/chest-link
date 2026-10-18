@@ -49,9 +49,15 @@ bool usingChestLinkHotspot();
 std::string chestLinkHotspotServerIP();
 #endif
 std::string ip();
+// Security mode and radio counters useful for diagnosing update transfers.
+// This never includes the Wi-Fi password or saved server PIN.
+std::string updateNetworkDiagnostics();
 uint32_t makePin();
 uint64_t milliseconds();
 std::vector<chestlink::Store> stores();
+// Root directories on the mounted SD/flashcard that may contain raw Pokémon
+// game save files. The shared reader validates each candidate before showing it.
+std::vector<std::string> gameSaveSearchRoots();
 unsigned maxChestBoxes();
 // Polls system events while sockets are waiting. Returns false for B/cancel.
 bool pollNetwork();
